@@ -2,6 +2,13 @@
 
 What changed, and why?
 
+## Linked Issue
+
+Closes #
+
+- [ ] The linked issue is assigned to me.
+- [ ] This PR targets `develop`.
+
 ## Package Impact
 
 - [ ] Package format or manifest behavior

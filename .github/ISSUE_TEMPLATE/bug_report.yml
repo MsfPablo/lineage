@@ -7,6 +7,8 @@ body:
     attributes:
       value: |
         Thanks for helping make Lineage more reliable. Please do not include secrets, private prompts, customer data, or API keys.
+
+        Before opening a PR for this issue, assign the issue to yourself. PRs should link an assigned issue.
   - type: textarea
     id: summary
     attributes:

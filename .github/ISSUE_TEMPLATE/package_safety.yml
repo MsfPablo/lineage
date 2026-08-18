@@ -7,6 +7,8 @@ body:
     attributes:
       value: |
         Use this for package validation, import/setup prompts, secret detection, file reconstruction, or provider boundary concerns.
+
+        Before opening a PR for this issue, assign the issue to yourself. PRs should link an assigned issue.
   - type: textarea
     id: concern
     attributes:
