@@ -1,0 +1,69 @@
+package runtime
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/lineage-dev/lineage/internal/config"
+	"github.com/lineage-dev/lineage/internal/packages"
+)
+
+func TestBuildPlanDryRun(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	project := filepath.Join(tmp, "project")
+	pkgDir := filepath.Join(project, "agent-pack")
+	if err := packages.InitPackage(pkgDir, "agent-pack"); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(pkgDir, "skills", "review", "SKILL.md"), "# Review")
+	mustWrite(t, filepath.Join(pkgDir, "workflows", "ship", "WORKFLOW.md"), "# Ship")
+
+	cfg := config.ProjectConfig{
+		Workspace:       "makers",
+		EnabledPackages: []string{"./agent-pack"},
+		Providers: map[string]config.Provider{
+			"claude": {Binary: "/bin/echo", Args: []string{"base"}},
+		},
+	}
+	if err := config.SaveProjectConfig(config.ProjectConfigPath(project), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := BuildPlan("claude", project, home, []string{"task"})
+	if err != nil {
+		t.Fatalf("BuildPlan() error = %v", err)
+	}
+	if plan.ProviderPlan.Binary != "/bin/echo" {
+		t.Fatalf("Binary = %q", plan.ProviderPlan.Binary)
+	}
+	if got := strings.Join(plan.ProviderPlan.Args, " "); got != "base task" {
+		t.Fatalf("Args = %q", got)
+	}
+
+	dryRun := plan.DryRunString()
+	for _, needle := range []string{"provider: claude", "workspace: makers", "agent-pack@0.1.0", "skills: review", "workflows: ship"} {
+		if !strings.Contains(dryRun, needle) {
+			t.Fatalf("DryRunString() missing %q:\n%s", needle, dryRun)
+		}
+	}
+}
+
+func TestBuildPlanUnknownProvider(t *testing.T) {
+	_, err := BuildPlan("unknown", t.TempDir(), t.TempDir(), nil)
+	if err == nil {
+		t.Fatal("BuildPlan() error = nil, want error")
+	}
+}
+
+func mustWrite(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

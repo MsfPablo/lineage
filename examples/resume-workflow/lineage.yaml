@@ -1,0 +1,13 @@
+name: resume-workflow
+version: 0.1.0
+description: Example package shape for a resume-focused agent environment.
+exports:
+  agents: []
+  workflows:
+    - resume-review
+requires:
+  skills:
+    - resume-review
+entrypoints:
+  claude: ""
+  codex: ""

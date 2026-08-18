@@ -1,0 +1,37 @@
+name: Package safety issue
+description: Report a problem with package contents, setup actions, or secret-safe sharing.
+title: "[Safety]: "
+labels: ["safety", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for package validation, import/setup prompts, secret detection, file reconstruction, or provider boundary concerns.
+  - type: textarea
+    id: concern
+    attributes:
+      label: Concern
+      description: What might be unsafe, surprising, or unclear for a package receiver?
+    validations:
+      required: true
+  - type: textarea
+    id: package-details
+    attributes:
+      label: Package details
+      description: Share only sanitized manifests, file names, and commands. Do not paste secrets or private workflow data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected guardrail
+      description: What should Lineage warn about, block, or ask permission for?
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets and private data from this report.
+          required: true

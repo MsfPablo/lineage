@@ -1,0 +1,48 @@
+name: Bug report
+description: Report something that does not work as expected.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping make Lineage more reliable. Please do not include secrets, private prompts, customer data, or API keys.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the smallest package or command sequence that shows the issue.
+      placeholder: |
+        1. Run `lineage ...`
+        2. Enable package `...`
+        3. See `...`
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Lineage version or commit, Go version if building locally, and provider command if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: package-impact
+    attributes:
+      label: Package impact
+      description: Does this affect package creation, enabling, launch planning, provider shims, or safety checks?
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets and private data from this report.
+          required: true

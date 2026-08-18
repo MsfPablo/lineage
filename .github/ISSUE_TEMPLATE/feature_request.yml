@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest an improvement to the agent package runtime.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep proposals focused on local agent package distribution. Please avoid including private workflow content.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem should Lineage solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should the user be able to do?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Package format
+        - Package discovery
+        - Setup flow
+        - Provider adapter
+        - Safety validation
+        - Documentation
+        - Tests
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility notes
+      description: How should this behave across different agent providers or operating systems?
+    validations:
+      required: false
