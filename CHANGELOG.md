@@ -101,6 +101,8 @@ All notable changes to Lineage will be documented here.
   inspect <ref>` (manifest, discovered contents, digest, and
   capabilities for any resolvable package — project path, user id, or
   workspace id — without enabling it).
+- Fixed a pre-existing rendering bug where `lineage help`/usage output
+  contained literal tab characters instead of consistent indentation.
 - Added `lineage doctor`: checks project config validity (and that
   every enabled ref still resolves), whether the shim directory is on
   `PATH` and ordered before real provider binaries (a real binary
@@ -109,6 +111,14 @@ All notable changes to Lineage will be documented here.
   every candidate, not just the one that currently wins silently.
   Fails (non-zero exit) only for things that are actually broken;
   ambiguous-but-working situations are warnings.
+- `lineage install-shims` now generates a `.cmd` batch shim on Windows
+  (previously it only ever wrote POSIX `sh` scripts, which Windows
+  can't execute) and a POSIX shim everywhere else, and shims are
+  generated from `internal/provider`'s registry instead of a
+  hardcoded `claude`/`codex` list. Provider binary resolution
+  (`findRealBinary`/`CandidateBinaries`) now resolves real binaries on
+  Windows through `PATHEXT` (`.exe`, `.cmd`, etc.) instead of only
+  matching an exact, extension-less filename.
 - `WORKFLOW.md` can now declare an ordered `steps` list (YAML
   frontmatter, the same convention `SKILL.md` already uses) naming
   skills within the same package. `lineage package validate` checks
