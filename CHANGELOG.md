@@ -93,6 +93,11 @@ All notable changes to Lineage will be documented here.
   than installed. Never overwrites an existing package; use `--as` to
   import under a different name. Export followed by import reproduces
   the original package exactly, verified by matching content digests.
+- Vendored `gopkg.in/yaml.v3`, Lineage's one dependency, under
+  `vendor/`. `go build`/`go test ./...` no longer need network access
+  to `proxy.golang.org` on a fresh checkout — Go automatically prefers
+  the vendored copy whenever `vendor/modules.txt` is present and
+  consistent with `go.mod`.
 - Added `lineage list` (enabled packages in the current project, with
   digest), `lineage disable <ref>` (removes a package and
   re-materializes for every provider that has ever run in this
