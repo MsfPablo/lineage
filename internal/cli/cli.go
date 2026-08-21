@@ -10,13 +10,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/lineage-dev/lineage/internal/auth"
-	"github.com/lineage-dev/lineage/internal/config"
-	"github.com/lineage-dev/lineage/internal/materialize"
-	"github.com/lineage-dev/lineage/internal/packages"
-	"github.com/lineage-dev/lineage/internal/provider"
-	"github.com/lineage-dev/lineage/internal/runtime"
-	"github.com/lineage-dev/lineage/internal/shim"
+	"github.com/agentic-lineage/lineage/internal/auth"
+	"github.com/agentic-lineage/lineage/internal/config"
+	"github.com/agentic-lineage/lineage/internal/materialize"
+	"github.com/agentic-lineage/lineage/internal/packages"
+	"github.com/agentic-lineage/lineage/internal/provider"
+	"github.com/agentic-lineage/lineage/internal/runtime"
+	"github.com/agentic-lineage/lineage/internal/shim"
 )
 
 // resolveGitHubToken finds the GitHub token that identifies a publisher:

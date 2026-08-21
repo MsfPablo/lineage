@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/lineage-dev/lineage/internal/auth"
+	"github.com/agentic-lineage/lineage/internal/auth"
 )
 
 // runLogin walks a publisher through GitHub's OAuth device flow and stores
