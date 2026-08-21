@@ -12,6 +12,20 @@ prepare once -> package safely -> share -> enable locally -> run with the user's
 
 Lineage does not try to replace the agent provider. It sits around local agent commands and makes the surrounding environment easier to package, review, and reproduce.
 
+## Install
+
+```bash
+curl -fsSL https://agenticlineage.vercel.app/install.sh | sh
+```
+
+Downloads the right prebuilt binary for your OS/architecture (macOS/Linux, amd64/arm64), verifies it against the release's published checksum, and installs it to `~/.lineage/bin`. No Go toolchain required. Windows: download `lineage-windows-amd64.exe` directly from the [latest release](https://github.com/agentic-lineage/lineage/releases/latest).
+
+Go developers can also build from source:
+
+```bash
+go install github.com/agentic-lineage/lineage/cmd/lineage@latest
+```
+
 ## What Is In A Package?
 
 A Lineage package is a normal folder with a `lineage.yaml` manifest:

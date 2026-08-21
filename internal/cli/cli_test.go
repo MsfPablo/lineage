@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lineage-dev/lineage/internal/config"
-	"github.com/lineage-dev/lineage/internal/packages"
+	"github.com/agentic-lineage/lineage/internal/config"
+	"github.com/agentic-lineage/lineage/internal/packages"
 )
 
 func TestEnableAndDryRun(t *testing.T) {
