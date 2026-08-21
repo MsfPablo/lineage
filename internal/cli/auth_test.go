@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lineage-dev/lineage/internal/auth"
-	"github.com/lineage-dev/lineage/internal/config"
+	"github.com/agentic-lineage/lineage/internal/auth"
+	"github.com/agentic-lineage/lineage/internal/config"
 )
 
 // withGitHubAuthServer points the auth package's device-flow and identity

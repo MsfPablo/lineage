@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lineage-dev/lineage/internal/packages"
-	"github.com/lineage-dev/lineage/internal/provider"
+	"github.com/agentic-lineage/lineage/internal/packages"
+	"github.com/agentic-lineage/lineage/internal/provider"
 )
 
 func TestNeedsApprovalOnFirstRun(t *testing.T) {

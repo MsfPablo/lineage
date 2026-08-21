@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/lineage-dev/lineage/internal/config"
-	"github.com/lineage-dev/lineage/internal/packages"
-	"github.com/lineage-dev/lineage/internal/provider"
+	"github.com/agentic-lineage/lineage/internal/config"
+	"github.com/agentic-lineage/lineage/internal/packages"
+	"github.com/agentic-lineage/lineage/internal/provider"
 )
 
 type Plan struct {

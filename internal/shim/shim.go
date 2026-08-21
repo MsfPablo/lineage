@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/lineage-dev/lineage/internal/provider"
+	"github.com/agentic-lineage/lineage/internal/provider"
 )
 
 // Install writes a shim for every registered provider (internal/provider's

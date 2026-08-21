@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/lineage-dev/lineage/internal/packages"
-	"github.com/lineage-dev/lineage/internal/provider"
+	"github.com/agentic-lineage/lineage/internal/packages"
+	"github.com/agentic-lineage/lineage/internal/provider"
 )
 
 func buildWorkflowPackage(t *testing.T, name string, skills ...string) packages.Package {

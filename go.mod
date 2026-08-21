@@ -1,4 +1,4 @@
-module github.com/lineage-dev/lineage
+module github.com/agentic-lineage/lineage
 
 go 1.22
 

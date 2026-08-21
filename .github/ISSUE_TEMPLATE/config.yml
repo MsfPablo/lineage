@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security report
-    url: https://github.com/lineage-dev/lineage/security/advisories/new
+    url: https://github.com/agentic-lineage/lineage/security/advisories/new
     about: Please report private security issues through GitHub Security Advisories.
