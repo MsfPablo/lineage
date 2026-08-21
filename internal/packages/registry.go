@@ -18,7 +18,11 @@ import (
 // 0012-v1-distribution-contract-and-receiver-activation.md), which is
 // itself a thin proxy in front of a private GitHub repo used as artifact
 // storage - the registry API is the only interface this file talks to.
-const DefaultRegistryURL = "https://lineage.dev"
+//
+// This is the actual deployed domain (priyam-jain-2002/lineagelanding on
+// Vercel), not a placeholder - update it if a custom domain is ever
+// attached in front of that deployment.
+const DefaultRegistryURL = "https://agenticlineage.vercel.app"
 
 // RegistryConfig is read from the environment by CLI commands, not stored
 // in .lineage/config.yaml: a publish token is a per-invocation secret, not
