@@ -55,6 +55,8 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		return runInit(args[1:], home, stdout, stderr)
 	case "package":
 		return runPackage(args[1:], home, stdout, stderr)
+	case "add":
+		return runAdd(args[1:], home, stdin, stdout, stderr)
 	case "enable":
 		return runEnable(args[1:], home, stdout, stderr)
 	case "list":
@@ -443,7 +445,14 @@ func runEnable(args []string, home string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stderr, err)
 		return err
 	}
+	return enableRef(args[0], home, stdout, stderr)
+}
 
+// enableRef is runEnable's actual work, factored out so `lineage add`
+// (which pulls a package and then enables it in one command) shares the
+// exact same project-root resolution and dependency validation instead of
+// a second, drifting implementation.
+func enableRef(ref, home string, stdout, stderr io.Writer) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -467,8 +476,6 @@ func runEnable(args []string, home string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stderr, err)
 		return err
 	}
-
-	ref := args[0]
 
 	// A "./" or "../" style ref is relative to where the user typed it
 	// (cwd), matching the documented `lineage enable ./resume-workflow`
@@ -527,6 +534,83 @@ func runEnable(args []string, home string, stdout, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "enabled package %s in %s\n", storedRef, configPath)
+	return nil
+}
+
+// runAdd is the one-command receiver path (#77): pull a published package,
+// show what it contains, ask permission, then enable it - fetch, inspect,
+// and enable in one step instead of three separate commands. This is what
+// the bootstrap prompt (#98) and `lineage add`'s own direct users both
+// build on.
+func runAdd(args []string, home string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, "usage: lineage add <package-ref> [--yes]\n\nFetch a published package, show what it contains, ask permission, then enable it in the current project - the one-command receiver path.")
+		return nil
+	}
+	if len(args) < 1 {
+		err := fmt.Errorf("usage: lineage add <package-ref> [--yes]")
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	ref := args[0]
+	autoApprove := false
+	for _, a := range args[1:] {
+		if a == "--yes" || a == "-y" {
+			autoApprove = true
+			continue
+		}
+		err := fmt.Errorf("usage: lineage add <package-ref> [--yes]")
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	destParent := config.UserPackagesDir(home)
+	if err := os.MkdirAll(destParent, 0o755); err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	cfg := packages.RegistryConfig{URL: os.Getenv("LINEAGE_REGISTRY_URL")}
+	name, err := packages.Pull(ref, cfg, destParent, "")
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	pkg, err := packages.Discover(filepath.Join(destParent, name))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	fmt.Fprintf(stdout, "fetched %s@%s\n", pkg.Manifest.Name, pkg.Manifest.Version)
+	fmt.Fprintf(stdout, "digest: %s\n", emptyValue(pkg.Digest))
+	if pkg.Manifest.Description != "" {
+		fmt.Fprintf(stdout, "description: %s\n", pkg.Manifest.Description)
+	}
+	fmt.Fprintf(stdout, "skills: %s\n", listValue(pkg.Skills))
+	fmt.Fprintf(stdout, "workflows: %s\n", listValue(pkg.Workflows))
+	fmt.Fprintf(stdout, "agents: %s\n", listValue(pkg.Agents))
+	fmt.Fprintf(stdout, "policies: %s\n", listValue(pkg.Policies))
+	fmt.Fprintf(stdout, "capabilities:\n")
+	fmt.Fprintf(stdout, "  filesystem.read: %s\n", listValue(pkg.Manifest.Capabilities.Filesystem.Read))
+	fmt.Fprintf(stdout, "  network: %s\n", listValue(pkg.Manifest.Capabilities.Network))
+
+	if !autoApprove {
+		fmt.Fprint(stdout, "\nEnable this package in the current project? [y/N] ")
+		if !confirm(stdin) {
+			fmt.Fprintf(stdout, "not enabled. It's still available locally - run `lineage enable %s` when you're ready.\n", name)
+			return nil
+		}
+	}
+
+	fmt.Fprintln(stdout)
+	if err := enableRef(name, home, stdout, stderr); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(stdout, "\nReady. Run `lineage run <%s>` to use it.\n", providerNameList())
 	return nil
 }
 
@@ -988,6 +1072,7 @@ Package authoring:
   package import <file.tgz> [--as name]   install an archive locally
 
 Registry:
+  add <ref> [--yes]                       fetch, inspect, and enable a package in one step
   login                                   authorize with GitHub (device flow)
   logout                                  clear the stored credential
   whoami                                  show who publish/pull will act as
