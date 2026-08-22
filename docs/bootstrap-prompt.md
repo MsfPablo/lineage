@@ -8,7 +8,7 @@ replaced by one real package reference, and the agent does the rest.
 This file is the canonical source. The website embeds a copy of this exact
 text (with `{{PACKAGE_REF}}` filled in per package) on each package's page
 at `/packages/<name>` — see `agentic-lineage/lineagelanding`'s
-`app/lib/bootstrapPrompt.ts`, which must be kept in sync with the template
+`app/components/bootstrapPrompt.ts`, which must be kept in sync with the template
 below by hand. There is no automated sync between the two repos yet; a
 diff check is tracked as follow-up in the ADR.
 
