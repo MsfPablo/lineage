@@ -49,3 +49,8 @@ Keep labels minimal. Use labels for important signals like `bug`, `enhancement`,
 Use the pull request template and include verification output. Every PR must link an assigned issue. PRs without a linked issue should not be reviewed except for maintainer-only housekeeping changes.
 
 For behavior that affects package setup or local files, explain what a receiver can inspect before enabling it.
+
+For changes that affect install, publishing, receiver activation, setup prompts,
+provider compatibility, or safety wording, check
+[docs/public-docs-sync.md](docs/public-docs-sync.md) and call out any website,
+Wiki, package-page, or Discussion sync still needed.

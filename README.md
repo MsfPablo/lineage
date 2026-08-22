@@ -48,19 +48,30 @@ These folders are intentionally plain. A receiver should be able to open the pac
 ```bash
 lineage init user
 lineage init workspace <name>
+
 lineage package init <name>
 lineage package validate <path>
 lineage package export <path> [-o file.tgz]
 lineage package import <file.tgz> [--as name]
+
+lineage add <package-ref> [--yes]
 lineage package publish <path>
 lineage package pull <package-ref> [--as name]
 lineage login
 lineage logout
 lineage whoami
+
 lineage enable <package-path-or-id>
+lineage disable <package-path-or-id>
+lineage list
+lineage inspect <package-path-or-id>
 lineage run claude --dry-run
 lineage run codex --dry-run
+lineage workflow run <workflow-name> <claude|codex> [--dry-run] [--yes]
+
 lineage install-shims
+lineage doctor
+lineage version
 ```
 
 The first time `lineage run` would actually stage files for a provider, it shows what it's about to create or change and asks for confirmation; pass `--yes`/`-y` to skip the prompt in scripts. `--dry-run` never writes anything.
@@ -126,16 +137,39 @@ lineage login   # opens a code + a github.com link to approve once
 lineage package publish ./resume-workflow
 ```
 
-On the receiving end, pull it straight from the registry (no login needed - pulling is an open read):
+On the receiving end, the shortest path is `lineage add`. It fetches the package, shows what it contains, asks before enabling unless `--yes` is passed, and records it in the current project:
+
+```bash
+lineage add resume-workflow
+```
+
+For scripts or bootstrap prompts where the caller has already decided to install the package:
+
+```bash
+lineage add resume-workflow --yes
+```
+
+You can still pull and enable in two explicit steps if you want to inspect the imported copy yourself first. Pulling is an open read and does not require login:
 
 ```bash
 lineage package pull resume-workflow
 lineage enable resume-workflow
 ```
 
-`lineage package pull` fetches `resume-workflow` (or `resume-workflow@0.2.0` for an exact version), verifies its content digest, and imports it exactly like `package import` would - see [docs/decisions/0012-v1-distribution-contract-and-receiver-activation.md](docs/decisions/0012-v1-distribution-contract-and-receiver-activation.md) for how the registry is structured.
+`lineage add` and `lineage package pull` accept `resume-workflow` for the latest version or `resume-workflow@0.2.0` for an exact version. Both verify the registry-reported digest against the package contents before keeping anything - see [docs/decisions/0012-v1-distribution-contract-and-receiver-activation.md](docs/decisions/0012-v1-distribution-contract-and-receiver-activation.md) for how the registry is structured.
 
 The first publish of a package name claims it for your verified GitHub login. To ship an update, bump `version` in `lineage.yaml` and run `lineage package publish` again - the registry accepts it because you're still the recorded owner of that name; a different GitHub account would be rejected. Run `lineage whoami` any time to check which identity is currently active, or `lineage logout` to clear it. For non-interactive use (CI), set `LINEAGE_PUBLISH_TOKEN` to any GitHub-issued token with `read:user` access instead of running `lineage login`.
+
+Published packages are browsable at [agenticlineage.vercel.app/packages](https://agenticlineage.vercel.app/packages). A package detail page includes the package version, digest, publisher, raw archive download, and a copy-paste bootstrap prompt for someone who has never installed Lineage before. The canonical bootstrap prompt lives in [docs/bootstrap-prompt.md](docs/bootstrap-prompt.md).
+
+Useful day-to-day checks:
+
+```bash
+lineage list
+lineage inspect resume-workflow
+lineage doctor
+lineage workflow run resume-review claude --dry-run
+```
 
 ## Safety Principles
 
@@ -144,6 +178,7 @@ The first publish of a package name claims it for your verified GitHub login. To
 - Setup actions should be explicit and permission-gated.
 - Package behavior should be idempotent where possible.
 - Provider-specific behavior should stay behind clear adapter boundaries.
+- Declared capabilities are visible to receivers but are not a sandbox in this build.
 
 ## Development
 
@@ -159,6 +194,11 @@ The source follows the standard Go layout:
 - `.agents/skills` contains repository-native guardrail skills for consistent agent-assisted development.
 
 Important project decisions are recorded in [docs/decisions](docs/decisions/README.md).
+Release and stable-branch rules are documented in
+[docs/release-versioning.md](docs/release-versioning.md).
+When behavior affects install, publishing, receiver activation, setup prompts,
+or safety wording, also check [docs/public-docs-sync.md](docs/public-docs-sync.md)
+so the website, Wiki, package pages, and Discussions do not drift.
 
 ## License
 

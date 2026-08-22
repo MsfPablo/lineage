@@ -58,7 +58,7 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	case "add":
 		return runAdd(args[1:], home, stdin, stdout, stderr)
 	case "enable":
-		return runEnable(args[1:], home, stdout, stderr)
+		return runEnable(args[1:], home, stdin, stdout, stderr)
 	case "list":
 		return runList(home, stdout, stderr)
 	case "disable":
@@ -184,15 +184,29 @@ func runPackage(args []string, home string, stdout, stderr io.Writer) error {
 		return nil
 	case "validate":
 		if isHelpFlag(args[1]) {
-			fmt.Fprintln(stdout, "usage: lineage package validate <path>\n\nCheck manifest schema, export authority, entrypoint path safety, and scan for secrets - without enabling or writing anything.")
+			fmt.Fprintln(stdout, "usage: lineage package validate <path> [--yaml]\n\nCheck manifest schema, export authority, entrypoint path safety, and scan for secrets - without enabling or writing anything. --yaml prints a stable, provider-independent structured report instead of the human-readable summary.")
 			return nil
 		}
-		if len(args) != 2 {
-			err := fmt.Errorf("usage: lineage package validate <path>")
+		path := ""
+		yamlOutput := false
+		for _, a := range args[1:] {
+			if a == "--yaml" {
+				yamlOutput = true
+				continue
+			}
+			if path != "" {
+				err := fmt.Errorf("usage: lineage package validate <path> [--yaml]")
+				fmt.Fprintln(stderr, err)
+				return err
+			}
+			path = a
+		}
+		if path == "" {
+			err := fmt.Errorf("usage: lineage package validate <path> [--yaml]")
 			fmt.Fprintln(stderr, err)
 			return err
 		}
-		return runPackageValidate(filepath.Clean(args[1]), stdout, stderr)
+		return runPackageValidate(filepath.Clean(path), yamlOutput, stdout, stderr)
 	case "export":
 		return runPackageExport(args[1:], stdout, stderr)
 	case "import":
@@ -390,11 +404,34 @@ func runPackageExport(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func runPackageValidate(dir string, stdout, stderr io.Writer) error {
+func runPackageValidate(dir string, yamlOutput bool, stdout, stderr io.Writer) error {
 	report, err := packages.Validate(dir)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
+	}
+
+	if yamlOutput {
+		// Best-effort: a package failing validation in a way that also
+		// breaks discovery (a traversing entrypoint, a declared-but-missing
+		// export) won't have one, and validateReport omits
+		// skills/workflows/agents/policies rather than guessing - the
+		// report's own errors already explain why.
+		discovered, discoverErr := packages.Discover(dir)
+		var discoveredPtr *packages.Package
+		if discoverErr == nil {
+			discoveredPtr = &discovered
+		}
+		if writeErr := writeYAML(stdout, validateReport(report, discoveredPtr)); writeErr != nil {
+			fmt.Fprintln(stderr, writeErr)
+			return writeErr
+		}
+		if !report.Passed() {
+			err := fmt.Errorf("package validation failed with %d error(s)", len(report.Errors))
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		return nil
 	}
 
 	fmt.Fprintf(stdout, "package: %s@%s (schema %d)\n", report.Manifest.Name, report.Manifest.Version, report.Manifest.Schema)
@@ -439,20 +476,47 @@ func emptyValue(value string) string {
 	return value
 }
 
-func runEnable(args []string, home string, stdout, stderr io.Writer) error {
-	if len(args) != 1 {
-		err := fmt.Errorf("usage: lineage enable <package-path-or-id>")
+// describeSuffix formats a setup item's optional description for the
+// setup plan printout: " - <description>" if present, otherwise nothing.
+func describeSuffix(description string) string {
+	if description == "" {
+		return ""
+	}
+	return " - " + description
+}
+
+func runEnable(args []string, home string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, "usage: lineage enable <package-path-or-id> [--yes]\n\nEnable a package in the current project. If the package declares setup - tracker files or directories its workflow expects - shows the plan and asks permission before creating anything; --yes skips that prompt.")
+		return nil
+	}
+	ref := ""
+	autoApprove := false
+	for _, a := range args {
+		if a == "--yes" || a == "-y" {
+			autoApprove = true
+			continue
+		}
+		if ref != "" {
+			err := fmt.Errorf("usage: lineage enable <package-path-or-id> [--yes]")
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		ref = a
+	}
+	if ref == "" {
+		err := fmt.Errorf("usage: lineage enable <package-path-or-id> [--yes]")
 		fmt.Fprintln(stderr, err)
 		return err
 	}
-	return enableRef(args[0], home, stdout, stderr)
+	return enableRef(ref, home, autoApprove, stdin, stdout, stderr)
 }
 
 // enableRef is runEnable's actual work, factored out so `lineage add`
 // (which pulls a package and then enables it in one command) shares the
-// exact same project-root resolution and dependency validation instead of
-// a second, drifting implementation.
-func enableRef(ref, home string, stdout, stderr io.Writer) error {
+// exact same project-root resolution, dependency validation, and setup
+// handling instead of a second, drifting implementation.
+func enableRef(ref, home string, autoApprove bool, stdin io.Reader, stdout, stderr io.Writer) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -528,6 +592,49 @@ func enableRef(ref, home string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	// A package can declare local setup (#72) - tracker files or
+	// directories its workflow expects to exist. Show exactly what would
+	// be created and get permission before writing anything; declining
+	// leaves the workspace completely unchanged, same as declining to
+	// enable at all, rather than enabling into a half-set-up state.
+	manifest, err := packages.LoadManifest(resolvedPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+	setupPlan, err := packages.PlanSetup(projectRoot, manifest.Setup)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+	if setupPlan.NeedsAction() {
+		fmt.Fprintf(stdout, "%s wants to set up:\n", manifest.Name)
+		for _, f := range setupPlan.Files {
+			if f.Exists {
+				continue
+			}
+			fmt.Fprintf(stdout, "  create file %s%s\n", f.Path, describeSuffix(f.Description))
+		}
+		for _, d := range setupPlan.Directories {
+			if d.Exists {
+				continue
+			}
+			fmt.Fprintf(stdout, "  create directory %s%s\n", d.Path, describeSuffix(d.Description))
+		}
+		if !autoApprove {
+			fmt.Fprint(stdout, "Create these? [y/N] ")
+			if !confirm(stdin) {
+				fmt.Fprintln(stdout, "not enabled - setup was declined. Nothing was created or changed.")
+				return nil
+			}
+		}
+		if err := packages.ApplySetup(projectRoot, setupPlan); err != nil {
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		fmt.Fprintln(stdout, "setup complete.")
+	}
+
 	cfg.EnabledPackages = newEnabled
 	if err := config.SaveProjectConfig(configPath, cfg); err != nil {
 		fmt.Fprintln(stderr, err)
@@ -542,9 +649,52 @@ func enableRef(ref, home string, stdout, stderr io.Writer) error {
 // and enable in one step instead of three separate commands. This is what
 // the bootstrap prompt (#98) and `lineage add`'s own direct users both
 // build on.
+// importAddSource brings ref into destParent as an extracted, digest-
+// verified package directory, converging local .tgz archives and registry
+// refs on the exact same shape before the shared inspect -> confirm ->
+// enable pipeline in runAdd ever runs (#71) - nothing past this point
+// cares which kind of source a package came from. action names what
+// actually happened ("fetched", "imported", or "already have") so runAdd
+// can report it accurately instead of always claiming to have fetched.
+//
+// Re-running add for a package already present locally is a deliberate
+// no-op, not a failure: Import/Pull both refuse to overwrite an existing
+// package directory, so a second run would otherwise error even though
+// nothing is wrong. This treats that specific error as success as long as
+// the content matches (digests equal) - a genuine conflict, the same
+// name/version now resolving to different content, still fails loudly
+// instead of silently keeping the stale local copy.
+func importAddSource(ref, destParent string) (name, action string, err error) {
+	if info, statErr := os.Stat(ref); statErr == nil && !info.IsDir() {
+		f, openErr := os.Open(ref)
+		if openErr != nil {
+			return "", "", openErr
+		}
+		defer f.Close()
+		name, err = packages.Import(f, destParent, "")
+		action = "imported"
+	} else {
+		cfg := packages.RegistryConfig{URL: os.Getenv("LINEAGE_REGISTRY_URL")}
+		name, err = packages.Pull(ref, cfg, destParent, "")
+		action = "fetched"
+	}
+
+	var already *packages.ErrAlreadyImported
+	if errors.As(err, &already) {
+		existingDigest, digestErr := packages.ComputeDigest(already.Dest)
+		if digestErr == nil && existingDigest == already.Digest {
+			return already.Name, "already have", nil
+		}
+		if digestErr == nil {
+			return "", "", fmt.Errorf("package %q already exists locally with different content (local digest %s, requested digest %s); remove %s first if you want to replace it", already.Name, existingDigest, already.Digest, already.Dest)
+		}
+	}
+	return name, action, err
+}
+
 func runAdd(args []string, home string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) > 0 && isHelpFlag(args[0]) {
-		fmt.Fprintln(stdout, "usage: lineage add <package-ref> [--yes]\n\nFetch a published package, show what it contains, ask permission, then enable it in the current project - the one-command receiver path.")
+		fmt.Fprintln(stdout, "usage: lineage add <package-ref> [--yes]\n\nFetch a published package, show what it contains, ask permission, then enable it in the current project - the one-command receiver path. <package-ref> is a registry ref (name or name@version), or the path to a local .tgz archive from `lineage package export`.")
 		return nil
 	}
 	if len(args) < 1 {
@@ -571,8 +721,7 @@ func runAdd(args []string, home string, stdin io.Reader, stdout, stderr io.Write
 		return err
 	}
 
-	cfg := packages.RegistryConfig{URL: os.Getenv("LINEAGE_REGISTRY_URL")}
-	name, err := packages.Pull(ref, cfg, destParent, "")
+	name, action, err := importAddSource(ref, destParent)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
@@ -584,7 +733,7 @@ func runAdd(args []string, home string, stdin io.Reader, stdout, stderr io.Write
 		return err
 	}
 
-	fmt.Fprintf(stdout, "fetched %s@%s\n", pkg.Manifest.Name, pkg.Manifest.Version)
+	fmt.Fprintf(stdout, "%s %s@%s\n", action, pkg.Manifest.Name, pkg.Manifest.Version)
 	fmt.Fprintf(stdout, "digest: %s\n", emptyValue(pkg.Digest))
 	if pkg.Manifest.Description != "" {
 		fmt.Fprintf(stdout, "description: %s\n", pkg.Manifest.Description)
@@ -606,7 +755,7 @@ func runAdd(args []string, home string, stdin io.Reader, stdout, stderr io.Write
 	}
 
 	fmt.Fprintln(stdout)
-	if err := enableRef(name, home, stdout, stderr); err != nil {
+	if err := enableRef(name, home, autoApprove, stdin, stdout, stderr); err != nil {
 		return err
 	}
 
@@ -711,12 +860,29 @@ func runDisable(args []string, home string, stdout, stderr io.Writer) error {
 }
 
 func runInspect(args []string, home string, stdout, stderr io.Writer) error {
-	if len(args) != 1 {
-		err := fmt.Errorf("usage: lineage inspect <package-path-or-id>")
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, "usage: lineage inspect <package-path-or-id> [--yaml]\n\nShow a package's contents. --yaml prints a stable, provider-independent structured report instead of the human-readable summary.")
+		return nil
+	}
+	ref := ""
+	yamlOutput := false
+	for _, a := range args {
+		if a == "--yaml" {
+			yamlOutput = true
+			continue
+		}
+		if ref != "" {
+			err := fmt.Errorf("usage: lineage inspect <package-path-or-id> [--yaml]")
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		ref = a
+	}
+	if ref == "" {
+		err := fmt.Errorf("usage: lineage inspect <package-path-or-id> [--yaml]")
 		fmt.Fprintln(stderr, err)
 		return err
 	}
-	ref := args[0]
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -753,6 +919,10 @@ func runInspect(args []string, home string, stdout, stderr io.Writer) error {
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
+	}
+
+	if yamlOutput {
+		return writeYAML(stdout, inspectReport(pkg))
 	}
 
 	fmt.Fprintf(stdout, "package: %s@%s (schema %d)\n", pkg.Manifest.Name, pkg.Manifest.Version, pkg.Manifest.Schema)
@@ -1067,7 +1237,7 @@ Usage:
 
 Package authoring:
   package init <name>                     scaffold a new package
-  package validate <path>                 check schema, safety, and exports
+  package validate <path> [--yaml]         check schema, safety, and exports
   package export <path> [-o file.tgz]     write a deterministic archive
   package import <file.tgz> [--as name]   install an archive locally
 
@@ -1080,10 +1250,10 @@ Registry:
   package pull <ref> [--as name]          fetch a published package
 
 Using a package:
-  enable <path-or-id>                     add a package to this project
+  enable <path-or-id> [--yes]              add a package to this project
   disable <path-or-id>                    remove a package from this project
   list                                    show enabled packages
-  inspect <path-or-id>                    show a package's contents
+  inspect <path-or-id> [--yaml]            show a package's contents
   run <%s> [--dry-run] [--yes]  launch a provider with packages applied
   workflow run <name> <%s>      run one declared workflow
 

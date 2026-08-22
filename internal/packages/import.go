@@ -21,6 +21,23 @@ import (
 // overwrites an existing package directory; it fails rather than silently
 // clobbering one.
 //
+// ErrAlreadyImported is returned by Import when destParent already has a
+// package directory under the name Import resolved (asName, or the
+// manifest's own name). Digest is the digest of the content Import was
+// just asked to import, computed before it discovered the conflict - a
+// caller that wants idempotent-reuse semantics (re-running the same
+// import is a no-op, not a failure) can compare Digest against the
+// existing directory's own digest instead of re-deriving either value.
+type ErrAlreadyImported struct {
+	Name   string
+	Dest   string
+	Digest string
+}
+
+func (e *ErrAlreadyImported) Error() string {
+	return fmt.Sprintf("package %q already exists at %s; remove it first or import with --as to use a different name", e.Name, e.Dest)
+}
+
 // Import returns the name the package was imported under.
 func Import(r io.Reader, destParent, asName string) (string, error) {
 	tmp, err := os.MkdirTemp("", "lineage-import-*")
@@ -48,7 +65,7 @@ func Import(r io.Reader, destParent, asName string) (string, error) {
 
 	dest := filepath.Join(destParent, name)
 	if _, err := os.Stat(dest); err == nil {
-		return "", fmt.Errorf("package %q already exists at %s; remove it first or import with --as to use a different name", name, dest)
+		return "", &ErrAlreadyImported{Name: name, Dest: dest, Digest: report.Digest}
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("check destination %s: %w", dest, err)
 	}

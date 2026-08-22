@@ -55,6 +55,23 @@ func Validate(dir string) (ValidateReport, error) {
 		report.Errors = append(report.Errors, err.Error())
 	}
 
+	// Setup paths are receiver-project-relative at apply time, but their
+	// safety (not absolute, can't escape via "..") doesn't depend on which
+	// root they're eventually resolved against - catch a bad declaration
+	// here, at publish time, rather than only when some future receiver
+	// tries to enable the package. dir stands in for "some root" purely to
+	// exercise the same check validateEntrypoint already relies on.
+	for _, f := range manifest.Setup.Files {
+		if _, err := SafeJoin(dir, f.Path); err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("setup.files: %v", err))
+		}
+	}
+	for _, d := range manifest.Setup.Directories {
+		if _, err := SafeJoin(dir, d.Path); err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("setup.directories: %v", err))
+		}
+	}
+
 	discoveredSkills := discoverSkillNames(filepath.Join(dir, "skills"))
 	skillSet := make(map[string]bool, len(discoveredSkills))
 	for _, s := range discoveredSkills {

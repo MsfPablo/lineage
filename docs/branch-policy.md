@@ -33,6 +33,10 @@ Apply these protections to both `master` and `develop`:
 
 The test workflow runs for pull requests targeting `develop` and pushes to `develop` or `master`.
 
+Release tags should point at commits that are already on `master`. See
+[Release And Versioning Policy](release-versioning.md) for the tagging,
+release-note, and stable-promotion rules.
+
 ## Planning Model
 
 Use goal-based milestones instead of date-based milestones. Labels should stay lightweight; day-to-day planning belongs in the GitHub Project board and milestone views.

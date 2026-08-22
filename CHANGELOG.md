@@ -5,6 +5,9 @@ All notable changes to Lineage will be documented here.
 ## Unreleased
 
 - Initial local agent package runtime scaffold.
+- Refreshed public-facing documentation for the current registry, `lineage add`,
+  workflow, inspect/list/doctor, and bootstrap-prompt surfaces; added a public
+  docs sync checklist for README/Wiki/website/package-page drift.
 - Project, user, and workspace package configuration.
 - Package initialization and discovery.
 - Provider launch planning and local shims.

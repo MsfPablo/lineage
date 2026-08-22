@@ -2,7 +2,7 @@ name: PR Policy
 
 on:
   pull_request:
-    branches: [develop]
+    branches: [develop, master]
     types: [opened, edited, reopened, synchronize, ready_for_review]
 
 permissions:
@@ -18,18 +18,22 @@ jobs:
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_BASE: ${{ github.event.pull_request.base.ref }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           python3 - <<'PY'
           import os
           import re
           import sys
+          import urllib.error
+          import urllib.request
 
           body = os.environ.get("PR_BODY") or ""
           base = os.environ.get("PR_BASE") or ""
+          repo = os.environ.get("GITHUB_REPOSITORY") or ""
           errors = []
 
-          if base != "develop":
-              errors.append("PR must target develop.")
+          if base not in {"develop", "master"}:
+              errors.append("PR must target develop, except release-tracked promotions may target master.")
 
           linked_issue = re.search(r"(?im)\b(closes|fixes|resolves)\s+#\d+\b", body)
           maintainer_housekeeping = re.search(r"(?im)\bmaintainer housekeeping\b", body)
@@ -44,7 +48,7 @@ jobs:
           has_test_case = bool(re.search(r"(?m)^-\s+\S+", tests_text))
 
           no_test_reason = re.search(
-              r"(?is)If this PR does not need automated tests, explain why:\s*(.+?)(?:## Notes For Reviewers|\Z)",
+              r"(?is)If this PR does not need automated tests, explain why:\s*(.+?)(?:## Release Tracking|## Notes For Reviewers|\Z)",
               body,
           )
           reason_text = no_test_reason.group(1).strip() if no_test_reason else ""
@@ -59,6 +63,72 @@ jobs:
 
           if has_test_case and not has_go_test:
               errors.append("PR with test changes must include `go test ./...` in Verification.")
+
+          def section_text(heading):
+              pattern = rf"(?ims)^## {re.escape(heading)}\s*(.+?)(?=^## |\Z)"
+              match = re.search(pattern, body)
+              return match.group(1).strip() if match else ""
+
+          def subsection_text(section, heading):
+              pattern = rf"(?is){re.escape(heading)}:\s*(.+?)(?=\n[A-Z][A-Za-z -]+:\n|\Z)"
+              match = re.search(pattern, section)
+              return match.group(1).strip() if match else ""
+
+          def has_checked_item(section, label):
+              return bool(re.search(rf"(?im)^-\s+\[[xX]\]\s+{re.escape(label)}\s*$", section))
+
+          def has_bullet_text(text):
+              return bool(re.search(r"(?m)^-\s+\S+", text))
+
+          if base == "master":
+              release = section_text("Release Tracking")
+              if not release:
+                  errors.append("PRs targeting master must include a Release Tracking section.")
+              else:
+                  is_release = has_checked_item(release, "Release-worthy master promotion")
+                  is_housekeeping = has_checked_item(release, "Non-release housekeeping")
+
+                  if is_release == is_housekeeping:
+                      errors.append("Master PRs must check exactly one release-tracking mode: release-worthy promotion or non-release housekeeping.")
+
+                  if is_housekeeping:
+                      reason = subsection_text(release, "Non-release housekeeping reason")
+                      if not has_bullet_text(reason):
+                          errors.append("Non-release housekeeping master PRs must explain why no release tag is needed.")
+
+                  if is_release:
+                      planned_version = subsection_text(release, "Planned version")
+                      version_match = re.search(r"\bv\d+\.\d+\.\d+\b", planned_version)
+                      if not version_match:
+                          errors.append("Release-worthy master PRs must declare a planned SemVer tag like `v0.4.0`.")
+                      else:
+                          version = version_match.group(0)
+                          tag_url = f"https://api.github.com/repos/{repo}/git/ref/tags/{version}"
+                          try:
+                              with urllib.request.urlopen(tag_url, timeout=10):
+                                  errors.append(f"Planned release tag {version} already exists.")
+                          except urllib.error.HTTPError as exc:
+                              if exc.code != 404:
+                                  errors.append(f"Could not check whether release tag {version} exists: HTTP {exc.code}.")
+                          except urllib.error.URLError as exc:
+                              errors.append(f"Could not check whether release tag {version} exists: {exc.reason}.")
+
+                      release_classification = subsection_text(release, "Release classification")
+                      if not re.search(r"\b(patch|minor|major)\b", release_classification):
+                          errors.append("Release-worthy master PRs must classify the version bump as patch, minor, or major.")
+
+                      for heading in [
+                          "What changed",
+                          "What is experimental",
+                          "What is outside scope",
+                          "Safety and compatibility notes",
+                      ]:
+                          content = subsection_text(release, heading)
+                          if not has_bullet_text(content):
+                              errors.append(f"Release notes must include at least one bullet for '{heading}'.")
+
+                      if not has_checked_item(release, "Create and push an annotated SemVer tag after merge to `master`."):
+                          errors.append("Release-worthy master PRs must confirm the post-merge annotated tag plan.")
 
           if errors:
               print("PR policy failed:")
