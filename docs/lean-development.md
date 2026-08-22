@@ -63,3 +63,6 @@ Every PR should:
 - Stay small enough to review.
 - Include tests or explain why tests do not apply.
 - Explain package safety impact when the change affects export, import, setup, or file materialization.
+- Check [public-docs-sync.md](public-docs-sync.md) when a change affects install,
+  publishing, receiver activation, setup prompts, provider compatibility, or
+  safety wording.
