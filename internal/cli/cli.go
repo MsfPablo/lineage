@@ -542,9 +542,52 @@ func enableRef(ref, home string, stdout, stderr io.Writer) error {
 // and enable in one step instead of three separate commands. This is what
 // the bootstrap prompt (#98) and `lineage add`'s own direct users both
 // build on.
+// importAddSource brings ref into destParent as an extracted, digest-
+// verified package directory, converging local .tgz archives and registry
+// refs on the exact same shape before the shared inspect -> confirm ->
+// enable pipeline in runAdd ever runs (#71) - nothing past this point
+// cares which kind of source a package came from. action names what
+// actually happened ("fetched", "imported", or "already have") so runAdd
+// can report it accurately instead of always claiming to have fetched.
+//
+// Re-running add for a package already present locally is a deliberate
+// no-op, not a failure: Import/Pull both refuse to overwrite an existing
+// package directory, so a second run would otherwise error even though
+// nothing is wrong. This treats that specific error as success as long as
+// the content matches (digests equal) - a genuine conflict, the same
+// name/version now resolving to different content, still fails loudly
+// instead of silently keeping the stale local copy.
+func importAddSource(ref, destParent string) (name, action string, err error) {
+	if info, statErr := os.Stat(ref); statErr == nil && !info.IsDir() {
+		f, openErr := os.Open(ref)
+		if openErr != nil {
+			return "", "", openErr
+		}
+		defer f.Close()
+		name, err = packages.Import(f, destParent, "")
+		action = "imported"
+	} else {
+		cfg := packages.RegistryConfig{URL: os.Getenv("LINEAGE_REGISTRY_URL")}
+		name, err = packages.Pull(ref, cfg, destParent, "")
+		action = "fetched"
+	}
+
+	var already *packages.ErrAlreadyImported
+	if errors.As(err, &already) {
+		existingDigest, digestErr := packages.ComputeDigest(already.Dest)
+		if digestErr == nil && existingDigest == already.Digest {
+			return already.Name, "already have", nil
+		}
+		if digestErr == nil {
+			return "", "", fmt.Errorf("package %q already exists locally with different content (local digest %s, requested digest %s); remove %s first if you want to replace it", already.Name, existingDigest, already.Digest, already.Dest)
+		}
+	}
+	return name, action, err
+}
+
 func runAdd(args []string, home string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) > 0 && isHelpFlag(args[0]) {
-		fmt.Fprintln(stdout, "usage: lineage add <package-ref> [--yes]\n\nFetch a published package, show what it contains, ask permission, then enable it in the current project - the one-command receiver path.")
+		fmt.Fprintln(stdout, "usage: lineage add <package-ref> [--yes]\n\nFetch a published package, show what it contains, ask permission, then enable it in the current project - the one-command receiver path. <package-ref> is a registry ref (name or name@version), or the path to a local .tgz archive from `lineage package export`.")
 		return nil
 	}
 	if len(args) < 1 {
@@ -571,8 +614,7 @@ func runAdd(args []string, home string, stdin io.Reader, stdout, stderr io.Write
 		return err
 	}
 
-	cfg := packages.RegistryConfig{URL: os.Getenv("LINEAGE_REGISTRY_URL")}
-	name, err := packages.Pull(ref, cfg, destParent, "")
+	name, action, err := importAddSource(ref, destParent)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
@@ -584,7 +626,7 @@ func runAdd(args []string, home string, stdin io.Reader, stdout, stderr io.Write
 		return err
 	}
 
-	fmt.Fprintf(stdout, "fetched %s@%s\n", pkg.Manifest.Name, pkg.Manifest.Version)
+	fmt.Fprintf(stdout, "%s %s@%s\n", action, pkg.Manifest.Name, pkg.Manifest.Version)
 	fmt.Fprintf(stdout, "digest: %s\n", emptyValue(pkg.Digest))
 	if pkg.Manifest.Description != "" {
 		fmt.Fprintf(stdout, "description: %s\n", pkg.Manifest.Description)
