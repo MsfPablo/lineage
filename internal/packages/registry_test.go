@@ -12,6 +12,62 @@ import (
 	"testing"
 )
 
+// TestPublishIncludesEntrypointsAndCapabilities covers #90: provider
+// compatibility and capabilities are already public, declarative
+// information once a package validates - Publish must send them to the
+// registry so a receiver can see them before ever pulling the package.
+func TestPublishIncludesEntrypointsAndCapabilities(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "capable-pack")
+	if err := InitPackage(root, "capable-pack"); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(root, "skills", "review", "SKILL.md"), "# Review")
+	manifest, err := LoadManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Entrypoints = Entrypoints{Claude: "skills/review/SKILL.md"}
+	manifest.Capabilities = Capabilities{
+		Filesystem: FilesystemCapabilities{Read: []string{"./data"}},
+		Network:    []string{"api.example.com"},
+	}
+	if err := SaveManifest(root, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotEntrypoints, gotCapabilities string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEntrypoints = r.URL.Query().Get("entrypoints")
+		gotCapabilities = r.URL.Query().Get("capabilities")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"alreadyPublished": false})
+	}))
+	defer srv.Close()
+
+	if _, err := Publish(root, RegistryConfig{URL: srv.URL, Token: "test-token"}); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	var entrypoints Entrypoints
+	if err := json.Unmarshal([]byte(gotEntrypoints), &entrypoints); err != nil {
+		t.Fatalf("entrypoints query param = %q, not valid JSON: %v", gotEntrypoints, err)
+	}
+	if entrypoints.Claude != "skills/review/SKILL.md" {
+		t.Errorf("entrypoints.Claude = %q, want skills/review/SKILL.md", entrypoints.Claude)
+	}
+
+	var capabilities Capabilities
+	if err := json.Unmarshal([]byte(gotCapabilities), &capabilities); err != nil {
+		t.Fatalf("capabilities query param = %q, not valid JSON: %v", gotCapabilities, err)
+	}
+	if len(capabilities.Filesystem.Read) != 1 || capabilities.Filesystem.Read[0] != "./data" {
+		t.Errorf("capabilities.Filesystem.Read = %v, want [./data]", capabilities.Filesystem.Read)
+	}
+	if len(capabilities.Network) != 1 || capabilities.Network[0] != "api.example.com" {
+		t.Errorf("capabilities.Network = %v, want [api.example.com]", capabilities.Network)
+	}
+}
+
 func TestPublishUploadsExportedArchive(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "publish-pack")
 	if err := InitPackage(root, "publish-pack"); err != nil {
