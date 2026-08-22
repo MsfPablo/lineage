@@ -24,6 +24,32 @@ type Manifest struct {
 	Requires     Requires     `yaml:"requires"`
 	Entrypoints  Entrypoints  `yaml:"entrypoints"`
 	Capabilities Capabilities `yaml:"capabilities"`
+	Setup        Setup        `yaml:"setup"`
+}
+
+// Setup declares local resources a package's workflow expects to exist -
+// tracker files and directories - so a receiver sees and approves exactly
+// what will be created before anything is, instead of a workflow silently
+// assuming files exist or creating them itself without asking (#72).
+type Setup struct {
+	Files       []SetupFile      `yaml:"files"`
+	Directories []SetupDirectory `yaml:"directories"`
+}
+
+// SetupFile is a single local file a package wants to exist, relative to
+// the project root. Template is its initial content if the file doesn't
+// already exist; a file already present at Path is never overwritten.
+type SetupFile struct {
+	Path        string `yaml:"path"`
+	Description string `yaml:"description"`
+	Template    string `yaml:"template"`
+}
+
+// SetupDirectory is a single local directory a package wants to exist,
+// relative to the project root (e.g. an output or notes directory).
+type SetupDirectory struct {
+	Path        string `yaml:"path"`
+	Description string `yaml:"description"`
 }
 
 type Exports struct {
@@ -69,6 +95,10 @@ func DefaultManifest(name string) Manifest {
 		Capabilities: Capabilities{
 			Filesystem: FilesystemCapabilities{Read: []string{}},
 			Network:    []string{},
+		},
+		Setup: Setup{
+			Files:       []SetupFile{},
+			Directories: []SetupDirectory{},
 		},
 	}
 }

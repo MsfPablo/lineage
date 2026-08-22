@@ -75,6 +75,29 @@ func TestValidateRejectsTraversingEntrypoint(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsTraversingSetupPath(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "setup-traversal-pack")
+	if err := InitPackage(root, "setup-traversal-pack"); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := LoadManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Setup.Files = []SetupFile{{Path: "../../etc/passwd"}}
+	if err := SaveManifest(root, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := Validate(root)
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if report.Passed() {
+		t.Fatal("report.Passed() = true, want false for a traversing setup file path")
+	}
+}
+
 func TestValidateNotesUnsatisfiedRequiredSkillWithoutFailing(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "dependent-pack")
 	if err := InitPackage(root, "dependent-pack"); err != nil {

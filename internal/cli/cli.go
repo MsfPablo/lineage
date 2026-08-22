@@ -58,7 +58,7 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	case "add":
 		return runAdd(args[1:], home, stdin, stdout, stderr)
 	case "enable":
-		return runEnable(args[1:], home, stdout, stderr)
+		return runEnable(args[1:], home, stdin, stdout, stderr)
 	case "list":
 		return runList(home, stdout, stderr)
 	case "disable":
@@ -439,20 +439,47 @@ func emptyValue(value string) string {
 	return value
 }
 
-func runEnable(args []string, home string, stdout, stderr io.Writer) error {
-	if len(args) != 1 {
-		err := fmt.Errorf("usage: lineage enable <package-path-or-id>")
+// describeSuffix formats a setup item's optional description for the
+// setup plan printout: " - <description>" if present, otherwise nothing.
+func describeSuffix(description string) string {
+	if description == "" {
+		return ""
+	}
+	return " - " + description
+}
+
+func runEnable(args []string, home string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, "usage: lineage enable <package-path-or-id> [--yes]\n\nEnable a package in the current project. If the package declares setup - tracker files or directories its workflow expects - shows the plan and asks permission before creating anything; --yes skips that prompt.")
+		return nil
+	}
+	ref := ""
+	autoApprove := false
+	for _, a := range args {
+		if a == "--yes" || a == "-y" {
+			autoApprove = true
+			continue
+		}
+		if ref != "" {
+			err := fmt.Errorf("usage: lineage enable <package-path-or-id> [--yes]")
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		ref = a
+	}
+	if ref == "" {
+		err := fmt.Errorf("usage: lineage enable <package-path-or-id> [--yes]")
 		fmt.Fprintln(stderr, err)
 		return err
 	}
-	return enableRef(args[0], home, stdout, stderr)
+	return enableRef(ref, home, autoApprove, stdin, stdout, stderr)
 }
 
 // enableRef is runEnable's actual work, factored out so `lineage add`
 // (which pulls a package and then enables it in one command) shares the
-// exact same project-root resolution and dependency validation instead of
-// a second, drifting implementation.
-func enableRef(ref, home string, stdout, stderr io.Writer) error {
+// exact same project-root resolution, dependency validation, and setup
+// handling instead of a second, drifting implementation.
+func enableRef(ref, home string, autoApprove bool, stdin io.Reader, stdout, stderr io.Writer) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -526,6 +553,49 @@ func enableRef(ref, home string, stdout, stderr io.Writer) error {
 	if err := packages.ValidateDependencies(resolvedForValidation); err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
+	}
+
+	// A package can declare local setup (#72) - tracker files or
+	// directories its workflow expects to exist. Show exactly what would
+	// be created and get permission before writing anything; declining
+	// leaves the workspace completely unchanged, same as declining to
+	// enable at all, rather than enabling into a half-set-up state.
+	manifest, err := packages.LoadManifest(resolvedPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+	setupPlan, err := packages.PlanSetup(projectRoot, manifest.Setup)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+	if setupPlan.NeedsAction() {
+		fmt.Fprintf(stdout, "%s wants to set up:\n", manifest.Name)
+		for _, f := range setupPlan.Files {
+			if f.Exists {
+				continue
+			}
+			fmt.Fprintf(stdout, "  create file %s%s\n", f.Path, describeSuffix(f.Description))
+		}
+		for _, d := range setupPlan.Directories {
+			if d.Exists {
+				continue
+			}
+			fmt.Fprintf(stdout, "  create directory %s%s\n", d.Path, describeSuffix(d.Description))
+		}
+		if !autoApprove {
+			fmt.Fprint(stdout, "Create these? [y/N] ")
+			if !confirm(stdin) {
+				fmt.Fprintln(stdout, "not enabled - setup was declined. Nothing was created or changed.")
+				return nil
+			}
+		}
+		if err := packages.ApplySetup(projectRoot, setupPlan); err != nil {
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		fmt.Fprintln(stdout, "setup complete.")
 	}
 
 	cfg.EnabledPackages = newEnabled
@@ -606,7 +676,7 @@ func runAdd(args []string, home string, stdin io.Reader, stdout, stderr io.Write
 	}
 
 	fmt.Fprintln(stdout)
-	if err := enableRef(name, home, stdout, stderr); err != nil {
+	if err := enableRef(name, home, autoApprove, stdin, stdout, stderr); err != nil {
 		return err
 	}
 
@@ -1080,7 +1150,7 @@ Registry:
   package pull <ref> [--as name]          fetch a published package
 
 Using a package:
-  enable <path-or-id>                     add a package to this project
+  enable <path-or-id> [--yes]              add a package to this project
   disable <path-or-id>                    remove a package from this project
   list                                    show enabled packages
   inspect <path-or-id>                    show a package's contents
