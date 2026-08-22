@@ -184,15 +184,29 @@ func runPackage(args []string, home string, stdout, stderr io.Writer) error {
 		return nil
 	case "validate":
 		if isHelpFlag(args[1]) {
-			fmt.Fprintln(stdout, "usage: lineage package validate <path>\n\nCheck manifest schema, export authority, entrypoint path safety, and scan for secrets - without enabling or writing anything.")
+			fmt.Fprintln(stdout, "usage: lineage package validate <path> [--yaml]\n\nCheck manifest schema, export authority, entrypoint path safety, and scan for secrets - without enabling or writing anything. --yaml prints a stable, provider-independent structured report instead of the human-readable summary.")
 			return nil
 		}
-		if len(args) != 2 {
-			err := fmt.Errorf("usage: lineage package validate <path>")
+		path := ""
+		yamlOutput := false
+		for _, a := range args[1:] {
+			if a == "--yaml" {
+				yamlOutput = true
+				continue
+			}
+			if path != "" {
+				err := fmt.Errorf("usage: lineage package validate <path> [--yaml]")
+				fmt.Fprintln(stderr, err)
+				return err
+			}
+			path = a
+		}
+		if path == "" {
+			err := fmt.Errorf("usage: lineage package validate <path> [--yaml]")
 			fmt.Fprintln(stderr, err)
 			return err
 		}
-		return runPackageValidate(filepath.Clean(args[1]), stdout, stderr)
+		return runPackageValidate(filepath.Clean(path), yamlOutput, stdout, stderr)
 	case "export":
 		return runPackageExport(args[1:], stdout, stderr)
 	case "import":
@@ -390,11 +404,34 @@ func runPackageExport(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func runPackageValidate(dir string, stdout, stderr io.Writer) error {
+func runPackageValidate(dir string, yamlOutput bool, stdout, stderr io.Writer) error {
 	report, err := packages.Validate(dir)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
+	}
+
+	if yamlOutput {
+		// Best-effort: a package failing validation in a way that also
+		// breaks discovery (a traversing entrypoint, a declared-but-missing
+		// export) won't have one, and validateReport omits
+		// skills/workflows/agents/policies rather than guessing - the
+		// report's own errors already explain why.
+		discovered, discoverErr := packages.Discover(dir)
+		var discoveredPtr *packages.Package
+		if discoverErr == nil {
+			discoveredPtr = &discovered
+		}
+		if writeErr := writeYAML(stdout, validateReport(report, discoveredPtr)); writeErr != nil {
+			fmt.Fprintln(stderr, writeErr)
+			return writeErr
+		}
+		if !report.Passed() {
+			err := fmt.Errorf("package validation failed with %d error(s)", len(report.Errors))
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		return nil
 	}
 
 	fmt.Fprintf(stdout, "package: %s@%s (schema %d)\n", report.Manifest.Name, report.Manifest.Version, report.Manifest.Schema)
@@ -823,12 +860,29 @@ func runDisable(args []string, home string, stdout, stderr io.Writer) error {
 }
 
 func runInspect(args []string, home string, stdout, stderr io.Writer) error {
-	if len(args) != 1 {
-		err := fmt.Errorf("usage: lineage inspect <package-path-or-id>")
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, "usage: lineage inspect <package-path-or-id> [--yaml]\n\nShow a package's contents. --yaml prints a stable, provider-independent structured report instead of the human-readable summary.")
+		return nil
+	}
+	ref := ""
+	yamlOutput := false
+	for _, a := range args {
+		if a == "--yaml" {
+			yamlOutput = true
+			continue
+		}
+		if ref != "" {
+			err := fmt.Errorf("usage: lineage inspect <package-path-or-id> [--yaml]")
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		ref = a
+	}
+	if ref == "" {
+		err := fmt.Errorf("usage: lineage inspect <package-path-or-id> [--yaml]")
 		fmt.Fprintln(stderr, err)
 		return err
 	}
-	ref := args[0]
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -865,6 +919,10 @@ func runInspect(args []string, home string, stdout, stderr io.Writer) error {
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
+	}
+
+	if yamlOutput {
+		return writeYAML(stdout, inspectReport(pkg))
 	}
 
 	fmt.Fprintf(stdout, "package: %s@%s (schema %d)\n", pkg.Manifest.Name, pkg.Manifest.Version, pkg.Manifest.Schema)
@@ -1179,7 +1237,7 @@ Usage:
 
 Package authoring:
   package init <name>                     scaffold a new package
-  package validate <path>                 check schema, safety, and exports
+  package validate <path> [--yaml]         check schema, safety, and exports
   package export <path> [-o file.tgz]     write a deterministic archive
   package import <file.tgz> [--as name]   install an archive locally
 
@@ -1195,7 +1253,7 @@ Using a package:
   enable <path-or-id> [--yes]              add a package to this project
   disable <path-or-id>                    remove a package from this project
   list                                    show enabled packages
-  inspect <path-or-id>                    show a package's contents
+  inspect <path-or-id> [--yaml]            show a package's contents
   run <%s> [--dry-run] [--yes]  launch a provider with packages applied
   workflow run <name> <%s>      run one declared workflow
 
