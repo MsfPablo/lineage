@@ -163,3 +163,206 @@ func TestAddDeclinedDoesNotEnable(t *testing.T) {
 		t.Errorf("expected the package to still be pulled locally after declining: %v", err)
 	}
 }
+
+// buildArchive exports srcDir to a .tgz file under tmp and returns its path,
+// for tests exercising add's local-archive source (#71: a local .tgz and a
+// pulled ref converge on the same inspect -> confirm -> enable pipeline).
+func buildArchive(t *testing.T, tmp, srcDir string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := packages.Export(srcDir, &buf); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(tmp, filepath.Base(srcDir)+".tgz")
+	if err := os.WriteFile(archivePath, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return archivePath
+}
+
+func TestAddLocalArchiveInspectsAndEnablesWithYes(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	project := filepath.Join(tmp, "project")
+	srcDir := filepath.Join(tmp, "changelog-writer")
+	if err := packages.InitPackage(srcDir, "changelog-writer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := buildArchive(t, tmp, srcDir)
+
+	t.Setenv(config.HomeEnv, home)
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(project); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	if err := Execute(nil, []string{"add", archivePath, "--yes"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("add error = %v stderr=%s", err, stderr.String())
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"imported changelog-writer@0.1.0", "enabled package changelog-writer"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout = %q, want it to contain %q", out, want)
+		}
+	}
+
+	found, err := config.FindProjectConfig(project)
+	if err != nil {
+		t.Fatalf("expected a project config after add --yes: %v", err)
+	}
+	if !contains(found.Config.EnabledPackages, "changelog-writer") {
+		t.Errorf("enabled packages = %v, want changelog-writer", found.Config.EnabledPackages)
+	}
+}
+
+func TestAddDeclinedLocalArchiveDoesNotEnable(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	project := filepath.Join(tmp, "project")
+	srcDir := filepath.Join(tmp, "notes-cleaner")
+	if err := packages.InitPackage(srcDir, "notes-cleaner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := buildArchive(t, tmp, srcDir)
+
+	t.Setenv(config.HomeEnv, home)
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(project); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("n\n")
+	if err := Execute(nil, []string{"add", archivePath}, stdin, &stdout, &stderr); err != nil {
+		t.Fatalf("add error = %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "not enabled") {
+		t.Fatalf("stdout = %q, want a message confirming it was not enabled", stdout.String())
+	}
+	if _, err := config.FindProjectConfig(project); err == nil {
+		t.Fatal("expected no project config to exist after declining")
+	}
+}
+
+// TestAddRepeatedProcessingIsIdempotent covers #71's "make repeated
+// processing safe and idempotent": re-running add for a package already
+// present locally (from either source) must succeed as a no-op instead of
+// failing with "already exists", as long as the content matches.
+func TestAddRepeatedProcessingIsIdempotent(t *testing.T) {
+	for _, src := range []string{"pulled", "local archive"} {
+		t.Run(src, func(t *testing.T) {
+			tmp := t.TempDir()
+			home := filepath.Join(tmp, "home")
+			project := filepath.Join(tmp, "project")
+			srcDir := filepath.Join(tmp, "pkg")
+			if err := packages.InitPackage(srcDir, "idempotent-pkg"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(project, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(config.HomeEnv, home)
+			oldWd, _ := os.Getwd()
+			if err := os.Chdir(project); err != nil {
+				t.Fatal(err)
+			}
+			defer os.Chdir(oldWd)
+
+			var ref string
+			if src == "pulled" {
+				srv := addTestServer(t, "idempotent-pkg@0.1.0", srcDir)
+				defer srv.Close()
+				t.Setenv("LINEAGE_REGISTRY_URL", srv.URL)
+				ref = "idempotent-pkg@0.1.0"
+			} else {
+				ref = buildArchive(t, tmp, srcDir)
+			}
+
+			var first bytes.Buffer
+			if err := Execute(nil, []string{"add", ref, "--yes"}, nil, &first, &first); err != nil {
+				t.Fatalf("first add error = %v output=%s", err, first.String())
+			}
+
+			var second bytes.Buffer
+			if err := Execute(nil, []string{"add", ref, "--yes"}, nil, &second, &second); err != nil {
+				t.Fatalf("second add error = %v, want a no-op success, output=%s", err, second.String())
+			}
+			if !strings.Contains(second.String(), "already have idempotent-pkg@0.1.0") {
+				t.Errorf("second add output = %q, want it to report the package was already present", second.String())
+			}
+
+			found, err := config.FindProjectConfig(project)
+			if err != nil {
+				t.Fatalf("expected a project config: %v", err)
+			}
+			count := 0
+			for _, p := range found.Config.EnabledPackages {
+				if p == "idempotent-pkg" {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Errorf("enabled_packages = %v, want exactly one idempotent-pkg entry, not %d", found.Config.EnabledPackages, count)
+			}
+		})
+	}
+}
+
+// TestAddDigestMismatchFailsClosed covers the other half of idempotent
+// reuse: if a package already exists locally under the same name but with
+// *different* content than what's being added, that's a real conflict, not
+// a no-op - add must fail rather than silently keep serving the stale copy.
+func TestAddDigestMismatchFailsClosed(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	project := filepath.Join(tmp, "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.HomeEnv, home)
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(project); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd)
+
+	// Something already lives locally under this name - deliberately
+	// different content than the archive add is about to bring in.
+	existingDir := filepath.Join(config.UserPackagesDir(home), "conflict-pkg")
+	if err := os.MkdirAll(existingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existingManifest := "schema: 1\nname: conflict-pkg\nversion: 0.1.0\ndescription: the version already on disk\nexports:\n    agents: []\n    workflows: []\nrequires:\n    skills: []\nentrypoints:\n    claude: \"\"\n    codex: \"\"\ncapabilities:\n    filesystem:\n        read: []\n    network: []\n"
+	if err := os.WriteFile(filepath.Join(existingDir, packages.ManifestFileName), []byte(existingManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srcDir := filepath.Join(tmp, "conflict-pkg-new")
+	if err := packages.InitPackage(srcDir, "conflict-pkg"); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := buildArchive(t, tmp, srcDir)
+
+	var stdout, stderr bytes.Buffer
+	err := Execute(nil, []string{"add", archivePath, "--yes"}, nil, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("add error = nil, want a digest-mismatch error instead of silently keeping the stale local copy")
+	}
+	if !strings.Contains(stderr.String(), "different content") {
+		t.Errorf("stderr = %q, want it to explain the content differs", stderr.String())
+	}
+
+	if _, cfgErr := config.FindProjectConfig(project); cfgErr == nil {
+		t.Error("expected no project config to exist after a failed, conflicting add")
+	}
+}
