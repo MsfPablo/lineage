@@ -19,6 +19,12 @@ import (
 	"github.com/agentic-lineage/lineage/internal/shim"
 )
 
+// Version is set at build time via
+// -ldflags "-X github.com/agentic-lineage/lineage/internal/cli.Version=vX.Y.Z"
+// (see the release build steps). Defaults to "dev" for a plain `go build`/
+// `go run`/`go install` without that flag, e.g. a local development build.
+var Version = "dev"
+
 // resolveGitHubToken finds the GitHub token that identifies a publisher:
 // LINEAGE_PUBLISH_TOKEN first (the escape hatch for non-interactive use,
 // e.g. CI - set it to any GitHub-issued token with read:user access), then
@@ -74,6 +80,9 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
+	case "version", "-v", "--version":
+		fmt.Fprintf(stdout, "lineage %s\n", Version)
+		return nil
 	default:
 		err := fmt.Errorf("unknown command %q", args[0])
 		fmt.Fprintln(stderr, err)
@@ -117,7 +126,35 @@ func runInit(args []string, home string, stdout, stderr io.Writer) error {
 	}
 }
 
+// packageUsage is shown for `lineage package` with no subcommand, and for
+// `lineage package -h`/`--help`. Each subcommand also answers its own
+// `-h`/`--help` with a one-line usage plus a short description - see
+// isHelpFlag's call sites below.
+const packageUsage = `usage: lineage package <command> [arguments]
+
+Commands:
+  init <name>                     scaffold a new package
+  validate <path>                 check schema, safety, and exports
+  export <path> [-o file.tgz]     write a deterministic archive
+  import <file.tgz> [--as name]   install an archive locally
+  publish <path>                  publish to the Lineage registry
+  pull <ref> [--as name]          fetch a published package
+
+Run 'lineage package <command> --help' for details on one command.`
+
+// isHelpFlag reports whether s is a bare -h/--help flag, so a subcommand
+// can answer "-h" with its own usage instead of trying to use it as a
+// path/name argument (which would otherwise fail with a confusing
+// filesystem or validation error).
+func isHelpFlag(s string) bool {
+	return s == "-h" || s == "--help"
+}
+
 func runPackage(args []string, home string, stdout, stderr io.Writer) error {
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, packageUsage)
+		return nil
+	}
 	if len(args) < 2 {
 		err := fmt.Errorf("usage: lineage package init <name> | lineage package validate <path> | lineage package export <path> [-o file.tgz] | lineage package import <file.tgz> [--as name] | lineage package publish <path> | lineage package pull <package-ref> [--as name]")
 		fmt.Fprintln(stderr, err)
@@ -126,6 +163,10 @@ func runPackage(args []string, home string, stdout, stderr io.Writer) error {
 
 	switch args[0] {
 	case "init":
+		if isHelpFlag(args[1]) {
+			fmt.Fprintln(stdout, "usage: lineage package init <name>\n\nScaffold a new package: lineage.yaml plus the standard skills/workflows/agents/policies/references/adapters folders.")
+			return nil
+		}
 		if len(args) != 2 {
 			err := fmt.Errorf("usage: lineage package init <name>")
 			fmt.Fprintln(stderr, err)
@@ -140,6 +181,10 @@ func runPackage(args []string, home string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "initialized package %s\n", dir)
 		return nil
 	case "validate":
+		if isHelpFlag(args[1]) {
+			fmt.Fprintln(stdout, "usage: lineage package validate <path>\n\nCheck manifest schema, export authority, entrypoint path safety, and scan for secrets - without enabling or writing anything.")
+			return nil
+		}
 		if len(args) != 2 {
 			err := fmt.Errorf("usage: lineage package validate <path>")
 			fmt.Fprintln(stderr, err)
@@ -162,6 +207,10 @@ func runPackage(args []string, home string, stdout, stderr io.Writer) error {
 }
 
 func runPackagePublish(args []string, home string, stdout, stderr io.Writer) error {
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, "usage: lineage package publish <path>\n\nValidate and publish a package to the Lineage registry, identified by the GitHub login from `lineage login` (or LINEAGE_PUBLISH_TOKEN). The first publish of a name claims it; later publishes need the same identity.")
+		return nil
+	}
 	if len(args) != 1 {
 		err := fmt.Errorf("usage: lineage package publish <path>")
 		fmt.Fprintln(stderr, err)
@@ -195,6 +244,10 @@ func runPackagePublish(args []string, home string, stdout, stderr io.Writer) err
 }
 
 func runPackagePull(args []string, home string, stdout, stderr io.Writer) error {
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, "usage: lineage package pull <package-ref> [--as name]\n\nFetch a published package (ref is \"name\" for the latest version, or an exact \"name@version\") and verify its content digest. An unauthenticated read - no login needed.")
+		return nil
+	}
 	if len(args) < 1 {
 		err := fmt.Errorf("usage: lineage package pull <package-ref> [--as name]")
 		fmt.Fprintln(stderr, err)
@@ -234,6 +287,10 @@ func runPackagePull(args []string, home string, stdout, stderr io.Writer) error 
 }
 
 func runPackageImport(args []string, home string, stdout, stderr io.Writer) error {
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, "usage: lineage package import <file.tgz> [--as name]\n\nExtract an exported archive into the user packages directory, re-validating it as untrusted input. Never overwrites an existing package; use --as to import under a different name.")
+		return nil
+	}
 	if len(args) < 1 {
 		err := fmt.Errorf("usage: lineage package import <file.tgz> [--as name]")
 		fmt.Fprintln(stderr, err)
@@ -277,6 +334,10 @@ func runPackageImport(args []string, home string, stdout, stderr io.Writer) erro
 }
 
 func runPackageExport(args []string, stdout, stderr io.Writer) error {
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, "usage: lineage package export <path> [-o file.tgz]\n\nWrite a deterministic .tgz archive of the package after running the same checks as validate. Refuses to export a package that fails validation.")
+		return nil
+	}
 	if len(args) < 1 {
 		err := fmt.Errorf("usage: lineage package export <path> [-o file.tgz]")
 		fmt.Fprintln(stderr, err)
@@ -914,28 +975,43 @@ func pathIndexOf(pathEntries []string, dir string) int {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, strings.TrimSpace(fmt.Sprintf(`
-Lineage shareable agent runtime
+Lineage - package a working agent setup, share it, and run it through your
+own Claude or Codex.
 
 Usage:
-  lineage init user
-  lineage init workspace <name>
-  lineage package init <name>
-  lineage package validate <path>
-  lineage package export <path> [-o file.tgz]
-  lineage package import <file.tgz> [--as name]
-  lineage package publish <path>
-  lineage package pull <package-ref> [--as name]
-  lineage login
-  lineage logout
-  lineage whoami
-  lineage enable <package-path-or-id>
-  lineage disable <package-path-or-id>
-  lineage list
-  lineage inspect <package-path-or-id>
-  lineage run <%s> [--dry-run] [--yes] [-- provider args...]
-  lineage doctor
-  lineage workflow run <workflow-name> <%s> [--dry-run] [--yes] [-- provider args...]
-  lineage install-shims
+  lineage <command> [arguments]
+
+Package authoring:
+  package init <name>                     scaffold a new package
+  package validate <path>                 check schema, safety, and exports
+  package export <path> [-o file.tgz]     write a deterministic archive
+  package import <file.tgz> [--as name]   install an archive locally
+
+Registry:
+  login                                   authorize with GitHub (device flow)
+  logout                                  clear the stored credential
+  whoami                                  show who publish/pull will act as
+  package publish <path>                  publish to the Lineage registry
+  package pull <ref> [--as name]          fetch a published package
+
+Using a package:
+  enable <path-or-id>                     add a package to this project
+  disable <path-or-id>                    remove a package from this project
+  list                                    show enabled packages
+  inspect <path-or-id>                    show a package's contents
+  run <%s> [--dry-run] [--yes]  launch a provider with packages applied
+  workflow run <name> <%s>      run one declared workflow
+
+Setup:
+  init user                               create the user package directory
+  init workspace <name>                   create a shared workspace
+  install-shims                           put lineage in front of claude/codex on PATH
+  doctor                                  check config, PATH, and provider setup
+
+  -h, --help                              show this help
+  -v, --version                           show the CLI version
+
+Run 'lineage package --help' or 'lineage <command> --help' for details on one command.
 `, providerNameList(), providerNameList())))
 }
 
