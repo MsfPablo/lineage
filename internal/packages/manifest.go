@@ -40,6 +40,22 @@ type Entrypoints struct {
 	Codex  string `yaml:"codex"`
 }
 
+// Providers returns which of claude/codex e declares a non-empty
+// entrypoint for - the "provider compatibility" a receiver sees before
+// enabling. Computed once here so every consumer (structured CLI output,
+// the registry's own listing) agrees on what "declared" means: a non-empty
+// entrypoint string, not just the field being present.
+func (e Entrypoints) Providers() []string {
+	var providers []string
+	if e.Claude != "" {
+		providers = append(providers, "claude")
+	}
+	if e.Codex != "" {
+		providers = append(providers, "codex")
+	}
+	return providers
+}
+
 // Capabilities is a purely declarative statement of what a package wants
 // access to — printed by lineage package validate and the enable-time plan
 // so a receiver can see it before enabling, not enforced by this build.
