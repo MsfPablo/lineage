@@ -28,6 +28,10 @@ Current milestones (see the GitHub Milestones page for the authoritative, up-to-
 
 A milestone is done when its issues prove the goal works well enough to trust, not when a calendar date arrives.
 
+Stable releases are cut from completed or explicitly bounded goal milestones.
+See [Release And Versioning Policy](release-versioning.md) for how milestone
+completion maps to `master` promotions and SemVer tags.
+
 ## Issue Shape
 
 Good issues should include:

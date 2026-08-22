@@ -159,6 +159,8 @@ The source follows the standard Go layout:
 - `.agents/skills` contains repository-native guardrail skills for consistent agent-assisted development.
 
 Important project decisions are recorded in [docs/decisions](docs/decisions/README.md).
+Release and stable-branch rules are documented in
+[docs/release-versioning.md](docs/release-versioning.md).
 
 ## License
 
