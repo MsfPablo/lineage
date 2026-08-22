@@ -74,6 +74,17 @@ func Publish(dir string, cfg RegistryConfig) (PublishResult, error) {
 	if report.Manifest.Description != "" {
 		q.Set("description", report.Manifest.Description)
 	}
+	// Provider compatibility and capabilities are already public,
+	// declarative information (visible to anyone running `lineage package
+	// validate` against the archive itself) - sending them lets a receiver
+	// see what a package targets and asks for before ever pulling it,
+	// rounding out #69's original directory scope (#90).
+	if entrypoints, err := json.Marshal(report.Manifest.Entrypoints); err == nil {
+		q.Set("entrypoints", string(entrypoints))
+	}
+	if capabilities, err := json.Marshal(report.Manifest.Capabilities); err == nil {
+		q.Set("capabilities", string(capabilities))
+	}
 
 	req, err := http.NewRequest(http.MethodPost, cfg.baseURL()+"/api/publish?"+q.Encode(), &buf)
 	if err != nil {

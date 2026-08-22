@@ -61,21 +61,25 @@ type Requires struct {
 	Skills []string `yaml:"skills"`
 }
 
+// Entrypoints and Capabilities carry both yaml and json tags: yaml for the
+// manifest file itself, json because Publish (#90) sends both verbatim to
+// the registry so a receiver can see provider compatibility and safety
+// notes before ever pulling the package, not just after enabling it.
 type Entrypoints struct {
-	Claude string `yaml:"claude"`
-	Codex  string `yaml:"codex"`
+	Claude string `yaml:"claude" json:"claude"`
+	Codex  string `yaml:"codex" json:"codex"`
 }
 
 // Capabilities is a purely declarative statement of what a package wants
 // access to — printed by lineage package validate and the enable-time plan
 // so a receiver can see it before enabling, not enforced by this build.
 type Capabilities struct {
-	Filesystem FilesystemCapabilities `yaml:"filesystem"`
-	Network    []string               `yaml:"network"`
+	Filesystem FilesystemCapabilities `yaml:"filesystem" json:"filesystem"`
+	Network    []string               `yaml:"network" json:"network"`
 }
 
 type FilesystemCapabilities struct {
-	Read []string `yaml:"read"`
+	Read []string `yaml:"read" json:"read"`
 }
 
 func DefaultManifest(name string) Manifest {
