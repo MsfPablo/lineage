@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/agentic-lineage/lineage/internal/atomicfile"
 )
 
 // Import extracts an archive produced by Export into a new directory under
@@ -127,7 +129,7 @@ func extractArchive(r io.Reader, destDir string) error {
 }
 
 func writeArchiveFile(target string, r io.Reader, size int64) error {
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	out, err := atomicfile.Create(target, 0o644)
 	if err != nil {
 		return err
 	}
@@ -136,7 +138,7 @@ func writeArchiveFile(target string, r io.Reader, size int64) error {
 	if _, err := io.CopyN(out, r, size); err != nil {
 		return err
 	}
-	return nil
+	return out.Commit()
 }
 
 // copyTree recursively copies every file under src into dest, preserving
@@ -159,9 +161,6 @@ func copyTree(src, dest string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		return os.WriteFile(target, data, 0o644)
+		return atomicfile.WriteFile(target, data, 0o644)
 	})
 }
