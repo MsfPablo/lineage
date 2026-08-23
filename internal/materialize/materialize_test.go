@@ -61,6 +61,27 @@ func TestNeedsApprovalTrueWhenPackageSetChanges(t *testing.T) {
 	}
 }
 
+// TestApplyRejectsCollidingSkillDirNames covers a regression where two
+// different (package, skill) pairs whose "-"-joined staged directory names
+// collide (package "foo-bar" skill "x" and package "foo" skill "bar-x"
+// both produce "foo-bar-x") would silently overwrite one another in a map,
+// permanently dropping one package's skill from what actually gets staged.
+// Apply/NeedsApproval must now fail loudly with a clear error instead.
+func TestApplyRejectsCollidingSkillDirNames(t *testing.T) {
+	root := t.TempDir()
+	first := buildTestPackage(t, "foo-bar", "x")
+	second := buildTestPackage(t, "foo", "bar-x")
+	adapter := provider.Provider{Name: "claude", SkillsDir: filepath.Join(".claude", "skills"), ContextFile: "CLAUDE.md"}
+
+	if err := Apply(root, adapter, []packages.Package{first, second}); err == nil {
+		t.Fatal("Apply() error = nil, want an error for colliding skill directory names")
+	}
+
+	if _, err := NeedsApproval(root, adapter, []packages.Package{first, second}); err == nil {
+		t.Fatal("NeedsApproval() error = nil, want an error for colliding skill directory names")
+	}
+}
+
 func TestApplyStagesSkillsAndWritesContextFile(t *testing.T) {
 	root := t.TempDir()
 	pkg := buildTestPackage(t, "review-pack", "review")
