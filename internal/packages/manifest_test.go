@@ -27,6 +27,46 @@ func TestLoadManifestRejectsUnsupportedSchema(t *testing.T) {
 	}
 }
 
+func TestLoadManifestRejectsPathTraversalInName(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, ManifestFileName), "name: ../../../../tmp/evil\nversion: 1.0.0\n")
+
+	if _, err := LoadManifest(dir); err == nil {
+		t.Fatal("LoadManifest() error = nil, want error for a name containing path traversal")
+	}
+}
+
+func TestLoadManifestRejectsPathTraversalInVersion(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, ManifestFileName), "name: safe-pack\nversion: ../escaped\n")
+
+	if _, err := LoadManifest(dir); err == nil {
+		t.Fatal("LoadManifest() error = nil, want error for a version containing path traversal")
+	}
+}
+
+func TestLoadManifestRejectsSlashInName(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, ManifestFileName), "name: nested/name\nversion: 1.0.0\n")
+
+	if _, err := LoadManifest(dir); err == nil {
+		t.Fatal("LoadManifest() error = nil, want error for a name containing a path separator")
+	}
+}
+
+func TestLoadManifestAcceptsSemverStyleVersion(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, ManifestFileName), "name: safe-pack\nversion: 1.0.0-beta.1+build.7\n")
+
+	manifest, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("LoadManifest() error = %v, want a semver-with-metadata version to be accepted", err)
+	}
+	if manifest.Version != "1.0.0-beta.1+build.7" {
+		t.Fatalf("Version = %q, want %q", manifest.Version, "1.0.0-beta.1+build.7")
+	}
+}
+
 func TestDefaultManifestRoundTripsCapabilities(t *testing.T) {
 	dir := t.TempDir()
 	manifest := DefaultManifest("cap-pack")

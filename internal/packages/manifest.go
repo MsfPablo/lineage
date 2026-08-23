@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"gopkg.in/yaml.v3"
 )
@@ -14,6 +15,22 @@ const ManifestFileName = "lineage.yaml"
 // schema describes how to interpret the manifest; version describes the
 // package itself — the two change independently.
 const CurrentSchema = 1
+
+// identifierPattern bounds Manifest.Name and Manifest.Version: no path
+// separators, no leading '.'/'-'/'+' (so a value can never start with ".."
+// or look like a CLI flag), nothing that would change meaning if joined
+// into a filesystem path or a filename. Both values flow unvalidated into
+// filepath.Join elsewhere (materialization's staged skill directories,
+// package export's default output filename), so this is enforced once
+// here rather than at every downstream call site.
+var identifierPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+-]*$`)
+
+func validateIdentifier(field, path, value string) error {
+	if !identifierPattern.MatchString(value) {
+		return fmt.Errorf("manifest %s: %s %q must start with a letter or digit and contain only letters, digits, '.', '_', '-', or '+'", path, field, value)
+	}
+	return nil
+}
 
 type Manifest struct {
 	Schema       int          `yaml:"schema"`
@@ -137,8 +154,14 @@ func LoadManifest(dir string) (Manifest, error) {
 	if manifest.Name == "" {
 		return Manifest{}, fmt.Errorf("manifest %s missing name", path)
 	}
+	if err := validateIdentifier("name", path, manifest.Name); err != nil {
+		return Manifest{}, err
+	}
 	if manifest.Version == "" {
 		manifest.Version = "0.1.0"
+	}
+	if err := validateIdentifier("version", path, manifest.Version); err != nil {
+		return Manifest{}, err
 	}
 	// schema 0 means the manifest predates the schema field; treat that as
 	// schema 1, the only schema that ever existed before it was added.
