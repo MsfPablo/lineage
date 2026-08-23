@@ -76,7 +76,7 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	case "list":
 		return runList(home, stdout, stderr)
 	case "disable":
-		return runDisable(args[1:], home, stdout, stderr)
+		return runDisable(args[1:], home, in, stdout, stderr)
 	case "inspect":
 		return runInspect(args[1:], home, stdout, stderr)
 	case "graph":
@@ -875,13 +875,30 @@ func runList(home string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func runDisable(args []string, home string, stdout, stderr io.Writer) error {
-	if len(args) != 1 {
-		err := fmt.Errorf("usage: lineage disable <package-path-or-id>")
+func runDisable(args []string, home string, stdin *bufio.Reader, stdout, stderr io.Writer) error {
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, "usage: lineage disable <package-path-or-id> [--yes]\n\nDisable a package and re-materialize every provider that has ever run in this project, so the packages it staged are actually removed. Asks for confirmation before re-materializing unless --yes is passed.")
+		return nil
+	}
+	ref := ""
+	autoApprove := false
+	for _, a := range args {
+		if a == "--yes" || a == "-y" {
+			autoApprove = true
+			continue
+		}
+		if ref != "" {
+			err := fmt.Errorf("usage: lineage disable <package-path-or-id> [--yes]")
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		ref = a
+	}
+	if ref == "" {
+		err := fmt.Errorf("usage: lineage disable <package-path-or-id> [--yes]")
 		fmt.Fprintln(stderr, err)
 		return err
 	}
-	ref := args[0]
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -919,6 +936,8 @@ func runDisable(args []string, home string, stdout, stderr io.Writer) error {
 	// anything no longer desired. A provider that was never materialized
 	// here doesn't get a state file created just because something else
 	// was disabled.
+	var pending []provider.Provider
+	needsApproval := false
 	for _, p := range provider.Known() {
 		hasState, err := materialize.HasState(found.Root, p.Name)
 		if err != nil {
@@ -928,6 +947,36 @@ func runDisable(args []string, home string, stdout, stderr io.Writer) error {
 		if !hasState {
 			continue
 		}
+		pending = append(pending, p)
+		na, err := materialize.NeedsApproval(found.Root, p, resolved)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		if na {
+			needsApproval = true
+		}
+	}
+
+	// Re-materializing rewrites every provider's staged content, not just
+	// the package being disabled - the same "explicit confirmation before
+	// anything is written" gate `run`/`workflow run` already use, since
+	// this can otherwise silently rewrite other, still-enabled packages'
+	// staged content as a side effect of disabling one.
+	if needsApproval && !autoApprove {
+		names := make([]string, len(pending))
+		for i, p := range pending {
+			names[i] = p.Name
+		}
+		fmt.Fprintf(stdout, "Disabling %s will re-materialize the remaining enabled packages for: %s\n", ref, strings.Join(names, ", "))
+		fmt.Fprint(stdout, "Proceed? [y/N] ")
+		if !confirm(stdin) {
+			fmt.Fprintln(stdout, "aborted: disable was not approved. Nothing was changed.")
+			return nil
+		}
+	}
+
+	for _, p := range pending {
 		if err := materialize.Apply(found.Root, p, resolved); err != nil {
 			fmt.Fprintln(stderr, err)
 			return err
