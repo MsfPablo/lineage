@@ -134,7 +134,8 @@ type packageMetadata struct {
 // The digest the registry reports for ref is untrusted the same way the
 // archive bytes are: after import, Pull recomputes the digest from the
 // content Import actually kept and fails closed - removing what was
-// imported - if it doesn't match what the registry claimed.
+// imported - if it doesn't match what the registry claimed, or if the
+// registry didn't report a digest at all.
 func Pull(ref string, cfg RegistryConfig, destParent, asName string) (string, error) {
 	meta, err := fetchPackageMetadata(ref, cfg)
 	if err != nil {
@@ -162,7 +163,11 @@ func Pull(ref string, cfg RegistryConfig, destParent, asName string) (string, er
 		os.RemoveAll(importedDir)
 		return "", fmt.Errorf("verify digest for %s: %w", ref, err)
 	}
-	if meta.Digest != "" && actualDigest != meta.Digest {
+	if meta.Digest == "" {
+		os.RemoveAll(importedDir)
+		return "", fmt.Errorf("registry response for %s did not report a digest; refusing to keep unverified content", ref)
+	}
+	if actualDigest != meta.Digest {
 		os.RemoveAll(importedDir)
 		return "", fmt.Errorf("digest mismatch for %s: registry reported %s, imported content hashes to %s; refusing to keep it", ref, meta.Digest, actualDigest)
 	}

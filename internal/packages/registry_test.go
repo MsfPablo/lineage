@@ -239,6 +239,32 @@ func TestPullFailsClosedOnDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestPullFailsClosedOnMissingDigest(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "no-digest-pack")
+	if err := InitPackage(src, "no-digest-pack"); err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	if err := Export(src, &archive); err != nil {
+		t.Fatal(err)
+	}
+
+	ref := "no-digest-pack@0.1.0"
+	srv := pullTestServer(t, ref, map[string]any{
+		"name": "no-digest-pack", "version": "0.1.0",
+		"downloadPath": "/api/packages/" + ref + "/download",
+	}, archive.Bytes())
+	defer srv.Close()
+
+	destParent := t.TempDir()
+	if _, err := Pull(ref, RegistryConfig{URL: srv.URL}, destParent, ""); err == nil {
+		t.Fatal("Pull() error = nil, want error when the registry omits the digest")
+	}
+	if _, err := os.Stat(filepath.Join(destParent, "no-digest-pack")); !os.IsNotExist(err) {
+		t.Errorf("Pull() left a package directory behind after a missing-digest response: err = %v", err)
+	}
+}
+
 func TestPullReportsMissingRef(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
