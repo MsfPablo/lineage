@@ -659,11 +659,14 @@ func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, 
 		fmt.Fprintln(stdout, "setup complete.")
 	}
 
-	cfg.EnabledPackages = newEnabled
-	if err := config.SaveProjectConfig(configPath, cfg); err != nil {
-		fmt.Fprintln(stderr, err)
-		return err
-	}
+	// Everything from here on must succeed before config is saved: once
+	// SaveProjectConfig runs, the package is durably marked enabled, so any
+	// step that can still fail (digest computation, the snapshot, the graph
+	// append) has to happen first. Otherwise a failure here - e.g. a
+	// corrupt .lineage/graph.json from an earlier partial write - would
+	// report enable as failed while having already left the package
+	// enabled in config, with no way back short of manually editing the
+	// file.
 
 	// Record that this project's local environment now descends from
 	// manifest, so `lineage graph list` can later explain where it came
@@ -677,7 +680,7 @@ func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, 
 	}
 
 	// Also take a durable, content-addressed snapshot of exactly what was
-	// enabled (#7), so the graph record above can point at something that
+	// enabled (#7), so the graph record below can point at something that
 	// can later be inspected, copied, or reconstructed byte-for-byte
 	// instead of only naming a version.
 	_, snapshotID, err := snapshot.Create(home, resolvedPath)
@@ -698,6 +701,12 @@ func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, 
 			Workspace: cfg.Workspace,
 		},
 	}); err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	cfg.EnabledPackages = newEnabled
+	if err := config.SaveProjectConfig(configPath, cfg); err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
 	}
