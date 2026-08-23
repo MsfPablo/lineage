@@ -52,15 +52,26 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		return err
 	}
 
+	// Wrapped once here, then threaded through as *bufio.Reader rather than
+	// io.Reader, so every confirm() prompt within this single invocation
+	// reads from the same buffer. A command that prompts more than once
+	// (e.g. `add`, which can ask about both enabling and setup) would
+	// otherwise have each confirm() call construct its own bufio.Reader,
+	// silently discarding whatever that call buffered but didn't consume.
+	var in *bufio.Reader
+	if stdin != nil {
+		in = bufio.NewReader(stdin)
+	}
+
 	switch args[0] {
 	case "init":
 		return runInit(args[1:], home, stdout, stderr)
 	case "package":
 		return runPackage(args[1:], home, stdout, stderr)
 	case "add":
-		return runAdd(args[1:], home, stdin, stdout, stderr)
+		return runAdd(args[1:], home, in, stdout, stderr)
 	case "enable":
-		return runEnable(args[1:], home, stdin, stdout, stderr)
+		return runEnable(args[1:], home, in, stdout, stderr)
 	case "list":
 		return runList(home, stdout, stderr)
 	case "disable":
@@ -70,9 +81,9 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	case "graph":
 		return runGraph(args[1:], stdout, stderr)
 	case "run":
-		return runProvider(ctx, args[1:], home, stdin, stdout, stderr)
+		return runProvider(ctx, args[1:], home, in, stdout, stderr)
 	case "workflow":
-		return runWorkflow(args[1:], home, stdin, stdout, stderr)
+		return runWorkflow(args[1:], home, in, stdout, stderr)
 	case "install-shims":
 		return runInstallShims(home, stdout, stderr)
 	case "doctor":
@@ -498,7 +509,7 @@ func describeSuffix(description string) string {
 	return " - " + description
 }
 
-func runEnable(args []string, home string, stdin io.Reader, stdout, stderr io.Writer) error {
+func runEnable(args []string, home string, stdin *bufio.Reader, stdout, stderr io.Writer) error {
 	if len(args) > 0 && isHelpFlag(args[0]) {
 		fmt.Fprintln(stdout, "usage: lineage enable <package-path-or-id> [--yes]\n\nEnable a package in the current project. If the package declares setup - tracker files or directories its workflow expects - shows the plan and asks permission before creating anything; --yes skips that prompt.")
 		return nil
@@ -529,7 +540,7 @@ func runEnable(args []string, home string, stdin io.Reader, stdout, stderr io.Wr
 // (which pulls a package and then enables it in one command) shares the
 // exact same project-root resolution, dependency validation, and setup
 // handling instead of a second, drifting implementation.
-func enableRef(ref, home string, autoApprove bool, stdin io.Reader, stdout, stderr io.Writer) error {
+func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, stderr io.Writer) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -743,7 +754,7 @@ func importAddSource(ref, destParent string) (name, action string, err error) {
 	return name, action, err
 }
 
-func runAdd(args []string, home string, stdin io.Reader, stdout, stderr io.Writer) error {
+func runAdd(args []string, home string, stdin *bufio.Reader, stdout, stderr io.Writer) error {
 	if len(args) > 0 && isHelpFlag(args[0]) {
 		fmt.Fprintln(stdout, "usage: lineage add <package-ref> [--yes]\n\nFetch a published package, show what it contains, ask permission, then enable it in the current project - the one-command receiver path. <package-ref> is a registry ref (name or name@version), or the path to a local .tgz archive from `lineage package export`.")
 		return nil
@@ -993,7 +1004,7 @@ func runInspect(args []string, home string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func runProvider(ctx context.Context, args []string, home string, stdin io.Reader, stdout, stderr io.Writer) error {
+func runProvider(ctx context.Context, args []string, home string, stdin *bufio.Reader, stdout, stderr io.Writer) error {
 	_ = ctx
 	if len(args) == 0 {
 		err := fmt.Errorf("usage: lineage run <%s> [--dry-run] [--yes] [-- provider args...]", providerNameList())
@@ -1060,7 +1071,7 @@ func runProvider(ctx context.Context, args []string, home string, stdin io.Reade
 	return nil
 }
 
-func runWorkflow(args []string, home string, stdin io.Reader, stdout, stderr io.Writer) error {
+func runWorkflow(args []string, home string, stdin *bufio.Reader, stdout, stderr io.Writer) error {
 	usage := fmt.Errorf("usage: lineage workflow run <workflow-name> <%s> [--dry-run] [--yes] [-- provider args...]", providerNameList())
 	if len(args) < 3 || args[0] != "run" {
 		fmt.Fprintln(stderr, usage)
@@ -1162,11 +1173,19 @@ func workflowPlanString(wf packages.Workflow, pkg packages.Package, providerName
 // affirmative answer ("y" or "yes", case-insensitive). Anything else,
 // including EOF or a nil reader, is treated as a decline - approval must be
 // explicit.
-func confirm(stdin io.Reader) bool {
+//
+// Takes the caller's own *bufio.Reader rather than wrapping an io.Reader
+// itself: a command that prompts more than once in one run (e.g. `add`,
+// which can ask about both enabling and setup) must read successive lines
+// off the same buffer. Constructing a fresh bufio.Reader per call would
+// silently discard whatever the previous call had already buffered but not
+// consumed if a single Read from stdin returned more than one line's worth
+// of bytes at once - the exact shape piped/scripted stdin takes.
+func confirm(stdin *bufio.Reader) bool {
 	if stdin == nil {
 		return false
 	}
-	line, err := bufio.NewReader(stdin).ReadString('\n')
+	line, err := stdin.ReadString('\n')
 	if err != nil && line == "" {
 		return false
 	}

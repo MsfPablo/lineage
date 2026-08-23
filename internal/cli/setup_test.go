@@ -257,3 +257,55 @@ func TestAddWithSetupYesAppliesWithoutPrompt(t *testing.T) {
 		t.Errorf("expected tasks.csv to be created via add --yes without a prompt: %v", err)
 	}
 }
+
+// TestAddRespectsBothPromptsFromSingleBufferedStdin covers a regression
+// where `add` (no --yes) answers two prompts in one run - "enable this
+// package?" then, for a package with setup, "create these files?" - and
+// each confirm() call used to construct its own bufio.Reader over the same
+// stdin. A single Read() delivering both answered lines at once (true for
+// strings.Reader, and for real piped/scripted stdin) meant the first
+// bufio.Reader buffered and discarded the second line before the second
+// confirm() call ever saw it, so a real "y\ny\n" silently behaved as if
+// the setup prompt had been declined.
+func TestAddRespectsBothPromptsFromSingleBufferedStdin(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	project := filepath.Join(tmp, "project")
+	srcDir := filepath.Join(tmp, "tracker-pack")
+	initPackageWithSetup(t, srcDir, "tracker-pack")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ref := "tracker-pack@0.1.0"
+	srv := addTestServer(t, ref, srcDir)
+	defer srv.Close()
+
+	t.Setenv(config.HomeEnv, home)
+	t.Setenv("LINEAGE_REGISTRY_URL", srv.URL)
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(project); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("y\ny\n")
+	if err := Execute(nil, []string{"add", ref}, stdin, &stdout, &stderr); err != nil {
+		t.Fatalf("add error = %v stderr=%s", err, stderr.String())
+	}
+
+	found, err := config.FindProjectConfig(project)
+	if err != nil {
+		t.Fatalf("expected a project config after answering yes to both prompts: %v", err)
+	}
+	if !contains(found.Config.EnabledPackages, "tracker-pack") {
+		t.Errorf("enabled packages = %v, want tracker-pack (the enable prompt's \"y\" must not be lost)", found.Config.EnabledPackages)
+	}
+	if _, err := os.Stat(filepath.Join(project, "tasks.csv")); err != nil {
+		t.Errorf("expected tasks.csv to be created: the setup prompt's \"y\" must not be lost: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Ready. Run `lineage run") {
+		t.Errorf("stdout = %q, want the success message once setup was actually approved and applied", stdout.String())
+	}
+}
