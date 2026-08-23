@@ -93,7 +93,10 @@ func apply(projectRoot string, adapter provider.Provider, pkgs []packages.Packag
 		return err
 	}
 
-	desired := desiredSkillDirs(adapter, pkgs)
+	desired, err := desiredSkillDirs(adapter, pkgs)
+	if err != nil {
+		return err
+	}
 
 	for _, rel := range prev.SkillDirs {
 		if _, ok := desired[rel]; ok {
@@ -136,7 +139,10 @@ func NeedsApproval(projectRoot string, adapter provider.Provider, pkgs []package
 		return false, err
 	}
 
-	desired := desiredSkillDirs(adapter, pkgs)
+	desired, err := desiredSkillDirs(adapter, pkgs)
+	if err != nil {
+		return false, err
+	}
 	desiredDirs := make([]string, 0, len(desired))
 	for rel := range desired {
 		desiredDirs = append(desiredDirs, rel)
@@ -157,15 +163,28 @@ func NeedsApprovalForWorkflow(projectRoot string, adapter provider.Provider, pkg
 	return NeedsApproval(projectRoot, adapter, []packages.Package{scoped})
 }
 
-func desiredSkillDirs(adapter provider.Provider, pkgs []packages.Package) map[string]string {
+// desiredSkillDirs computes each enabled skill's staged directory name by
+// joining package name and skill name with "-". Neither is restricted
+// enough to make that join unambiguous on its own (manifest names can
+// contain "-", and hyphenated skill names like "commit-messages" are
+// normal): package "foo-bar" skill "x" and package "foo" skill "bar-x"
+// both produce "foo-bar-x". Rather than change the naming scheme (which
+// would make every staged directory harder to read, for a collision that
+// almost never happens), a genuine collision is detected and reported as
+// an error instead of one entry silently overwriting the other in the map.
+func desiredSkillDirs(adapter provider.Provider, pkgs []packages.Package) (map[string]string, error) {
 	desired := map[string]string{} // relative skill dir -> absolute source dir
 	for _, pkg := range pkgs {
 		for _, skill := range pkg.Skills {
 			rel := filepath.Join(adapter.SkillsDir, pkg.Manifest.Name+"-"+skill)
-			desired[rel] = filepath.Join(pkg.Path, "skills", skill)
+			src := filepath.Join(pkg.Path, "skills", skill)
+			if existing, ok := desired[rel]; ok && existing != src {
+				return nil, fmt.Errorf("skill directory name %q is claimed by both %s and %s - rename one of these skills or packages to disambiguate", rel, existing, src)
+			}
+			desired[rel] = src
 		}
 	}
-	return desired
+	return desired, nil
 }
 
 func equalStrings(a, b []string) bool {
