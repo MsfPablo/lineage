@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/agentic-lineage/lineage/internal/atomicfile"
 	"github.com/agentic-lineage/lineage/internal/packages"
 	"github.com/agentic-lineage/lineage/internal/provider"
 )
@@ -203,7 +204,7 @@ func saveState(projectRoot, providerName string, s state) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return atomicfile.WriteFile(path, data, 0o644)
 }
 
 func writeSummary(path string, pkgs []packages.Package, wf *WorkflowSequence) error {
@@ -219,10 +220,7 @@ func writeSummary(path string, pkgs []packages.Package, wf *WorkflowSequence) er
 		next = replaceBlock(string(existing), block)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(next), 0o644)
+	return atomicfile.WriteFile(path, []byte(next), 0o644)
 }
 
 func renderSummaryBlock(pkgs []packages.Package, wf *WorkflowSequence) string {
@@ -312,15 +310,14 @@ func copyFile(src, dest string) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return err
-	}
-	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+	out, err := atomicfile.Create(dest, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
 	defer out.Close()
 
-	_, err = io.Copy(out, in)
-	return err
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Commit()
 }

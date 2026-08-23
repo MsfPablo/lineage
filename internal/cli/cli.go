@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/agentic-lineage/lineage/internal/atomicfile"
 	"github.com/agentic-lineage/lineage/internal/auth"
 	"github.com/agentic-lineage/lineage/internal/config"
 	"github.com/agentic-lineage/lineage/internal/materialize"
@@ -393,20 +394,18 @@ func runPackageExport(args []string, stdout, stderr io.Writer) error {
 		outPath = fmt.Sprintf("%s-%s.tgz", manifest.Name, manifest.Version)
 	}
 
-	f, err := os.Create(outPath)
+	f, err := atomicfile.Create(outPath, 0o644)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
 	}
+	defer f.Close()
 
 	if err := packages.Export(dir, f); err != nil {
-		f.Close()
-		os.Remove(outPath)
 		fmt.Fprintln(stderr, err)
 		return err
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(outPath)
+	if err := f.Commit(); err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
 	}
