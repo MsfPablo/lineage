@@ -12,6 +12,7 @@ import (
 
 	"github.com/agentic-lineage/lineage/internal/auth"
 	"github.com/agentic-lineage/lineage/internal/config"
+	"github.com/agentic-lineage/lineage/internal/graph"
 	"github.com/agentic-lineage/lineage/internal/materialize"
 	"github.com/agentic-lineage/lineage/internal/packages"
 	"github.com/agentic-lineage/lineage/internal/provider"
@@ -65,6 +66,8 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		return runDisable(args[1:], home, stdout, stderr)
 	case "inspect":
 		return runInspect(args[1:], home, stdout, stderr)
+	case "graph":
+		return runGraph(args[1:], stdout, stderr)
 	case "run":
 		return runProvider(ctx, args[1:], home, stdin, stdout, stderr)
 	case "workflow":
@@ -649,6 +652,32 @@ func enableRef(ref, home string, autoApprove bool, stdin io.Reader, stdout, stde
 		fmt.Fprintln(stderr, err)
 		return err
 	}
+
+	// Record that this project's local environment now descends from
+	// manifest, so `lineage graph list` can later explain where it came
+	// from (#6). Digest is recomputed here (ComputeDigest, the same
+	// identity Pull/Import verify against) rather than reusing a value
+	// from earlier resolution, since enableRef never needed it until now.
+	digest, err := packages.ComputeDigest(resolvedPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+	if _, err := graph.Append(projectRoot, graph.Record{
+		Event: "enable",
+		Parent: graph.ParentRef{
+			Name:    manifest.Name,
+			Version: manifest.Version,
+			Digest:  digest,
+		},
+		Descendant: graph.DescendantRef{
+			Workspace: cfg.Workspace,
+		},
+	}); err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
 	fmt.Fprintf(stdout, "enabled package %s in %s\n", storedRef, configPath)
 	return nil
 }
@@ -1263,6 +1292,7 @@ Using a package:
   disable <path-or-id>                    remove a package from this project
   list                                    show enabled packages
   inspect <path-or-id> [--yaml]            show a package's contents
+  graph list [--yaml]                      show what this project's state descends from
   run <%s> [--dry-run] [--yes]  launch a provider with packages applied
   workflow run <name> <%s>      run one declared workflow
 
