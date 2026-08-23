@@ -9,10 +9,11 @@ import (
 
 	"github.com/agentic-lineage/lineage/internal/config"
 	"github.com/agentic-lineage/lineage/internal/graph"
+	"github.com/agentic-lineage/lineage/internal/snapshot"
 )
 
 func TestEnableRecordsGraphEntry(t *testing.T) {
-	project, _ := setUpEnabledProject(t)
+	project, home := setUpEnabledProject(t)
 
 	records, err := graph.Load(project)
 	if err != nil {
@@ -36,6 +37,13 @@ func TestEnableRecordsGraphEntry(t *testing.T) {
 	}
 	if rec.CreatedAt.IsZero() {
 		t.Error("CreatedAt is zero")
+	}
+
+	if rec.Parent.SnapshotID == "" {
+		t.Fatal("Parent.SnapshotID is empty, want a snapshot created by enableRef")
+	}
+	if _, err := snapshot.LoadManifest(home, snapshot.ObjectID(rec.Parent.SnapshotID)); err != nil {
+		t.Fatalf("snapshot.LoadManifest(%q) error = %v, want the snapshot enableRef created to be loadable", rec.Parent.SnapshotID, err)
 	}
 }
 
@@ -85,6 +93,9 @@ func TestGraphListYAMLOutput(t *testing.T) {
 	}
 	if !strings.Contains(out, "event: enable") {
 		t.Fatalf("graph list --yaml output = %s, want it to mention event: enable", out)
+	}
+	if !strings.Contains(out, "snapshot_id: sha256:") {
+		t.Fatalf("graph list --yaml output = %s, want it to mention a snapshot_id", out)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/agentic-lineage/lineage/internal/provider"
 	"github.com/agentic-lineage/lineage/internal/runtime"
 	"github.com/agentic-lineage/lineage/internal/shim"
+	"github.com/agentic-lineage/lineage/internal/snapshot"
 )
 
 // Version is set at build time via
@@ -663,12 +664,24 @@ func enableRef(ref, home string, autoApprove bool, stdin io.Reader, stdout, stde
 		fmt.Fprintln(stderr, err)
 		return err
 	}
+
+	// Also take a durable, content-addressed snapshot of exactly what was
+	// enabled (#7), so the graph record above can point at something that
+	// can later be inspected, copied, or reconstructed byte-for-byte
+	// instead of only naming a version.
+	_, snapshotID, err := snapshot.Create(home, resolvedPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
 	if _, err := graph.Append(projectRoot, graph.Record{
 		Event: "enable",
 		Parent: graph.ParentRef{
-			Name:    manifest.Name,
-			Version: manifest.Version,
-			Digest:  digest,
+			Name:       manifest.Name,
+			Version:    manifest.Version,
+			Digest:     digest,
+			SnapshotID: string(snapshotID),
 		},
 		Descendant: graph.DescendantRef{
 			Workspace: cfg.Workspace,
