@@ -520,18 +520,25 @@ func runEnable(args []string, home string, stdin *bufio.Reader, stdout, stderr i
 		fmt.Fprintln(stderr, err)
 		return err
 	}
-	return enableRef(ref, home, autoApprove, stdin, stdout, stderr)
+	_, err := enableRef(ref, home, autoApprove, stdin, stdout, stderr)
+	return err
 }
 
 // enableRef is runEnable's actual work, factored out so `lineage add`
 // (which pulls a package and then enables it in one command) shares the
 // exact same project-root resolution, dependency validation, and setup
 // handling instead of a second, drifting implementation.
-func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, stderr io.Writer) error {
+//
+// The bool return reports whether the package actually ended up enabled: a
+// declined setup prompt is not an error (enableRef already printed why and
+// left the workspace unchanged), but it is also not success - callers like
+// runAdd need to tell the two apart instead of treating "no error" as
+// "enabled" and reporting readiness for a package that was never turned on.
+func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, stderr io.Writer) (bool, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
 	}
 
 	// Reuse the project config an enclosing `lineage run` would find (it
@@ -549,7 +556,7 @@ func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, 
 		cfg = found.Config
 	} else if !errors.Is(err, config.ErrProjectConfigNotFound) {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
 	}
 
 	// A "./" or "../" style ref is relative to where the user typed it
@@ -566,7 +573,7 @@ func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, 
 	resolvedPath, err := packages.ResolveReference(home, cfg.Workspace, resolveRoot, ref)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
 	}
 
 	// The config we're about to save lives at the project root, and
@@ -596,11 +603,11 @@ func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, 
 	resolvedForValidation, err := packages.ResolveEnabled(home, cfg.Workspace, projectRoot, newEnabled)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
 	}
 	if err := packages.ValidateDependencies(resolvedForValidation); err != nil {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
 	}
 
 	// A package can declare local setup (#72) - tracker files or
@@ -611,12 +618,12 @@ func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, 
 	manifest, err := packages.LoadManifest(resolvedPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
 	}
 	setupPlan, err := packages.PlanSetup(projectRoot, manifest.Setup)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
 	}
 	if setupPlan.NeedsAction() {
 		fmt.Fprintf(stdout, "%s wants to set up:\n", manifest.Name)
@@ -636,12 +643,12 @@ func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, 
 			fmt.Fprint(stdout, "Create these? [y/N] ")
 			if !confirm(stdin) {
 				fmt.Fprintln(stdout, "not enabled - setup was declined. Nothing was created or changed.")
-				return nil
+				return false, nil
 			}
 		}
 		if err := packages.ApplySetup(projectRoot, setupPlan); err != nil {
 			fmt.Fprintln(stderr, err)
-			return err
+			return false, err
 		}
 		fmt.Fprintln(stdout, "setup complete.")
 	}
@@ -649,10 +656,10 @@ func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, 
 	cfg.EnabledPackages = newEnabled
 	if err := config.SaveProjectConfig(configPath, cfg); err != nil {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
 	}
 	fmt.Fprintf(stdout, "enabled package %s in %s\n", storedRef, configPath)
-	return nil
+	return true, nil
 }
 
 // runAdd is the one-command receiver path (#77): pull a published package,
@@ -766,8 +773,15 @@ func runAdd(args []string, home string, stdin *bufio.Reader, stdout, stderr io.W
 	}
 
 	fmt.Fprintln(stdout)
-	if err := enableRef(name, home, autoApprove, stdin, stdout, stderr); err != nil {
+	enabled, err := enableRef(name, home, autoApprove, stdin, stdout, stderr)
+	if err != nil {
 		return err
+	}
+	if !enabled {
+		// enableRef already explained why (a declined setup prompt) and
+		// left the workspace unchanged - reporting readiness here would
+		// tell the user to run a package that was never actually enabled.
+		return nil
 	}
 
 	fmt.Fprintf(stdout, "\nReady. Run `lineage run <%s>` to use it.\n", providerNameList())
