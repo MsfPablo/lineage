@@ -329,7 +329,20 @@ func copyFile(src, dest string) error {
 		return err
 	}
 
-	out, err := atomicfile.Create(dest, info.Mode().Perm())
+	// Cap at 0o755 rather than copying the source file's mode verbatim: a
+	// package could otherwise ship a skill file with 0o666/0o777
+	// permissions and have that exact mode replicated into the receiver's
+	// project, potentially leaving world-writable files behind on a
+	// multi-user machine. Masking with 0o755 keeps any owner/group/other
+	// read or execute bits the source had, but can never grant group or
+	// other write access regardless of what the source declared. Chmod'd
+	// explicitly after creation rather than only passed to OpenFile,
+	// since OpenFile's mode argument is itself subject to the process's
+	// umask - relying on that alone would make the cap only as strong as
+	// whatever umask happens to be in effect on the receiver's machine,
+	// rather than a guarantee this codebase actually makes.
+	perm := info.Mode().Perm() & 0o755
+	out, err := atomicfile.Create(dest, perm)
 	if err != nil {
 		return err
 	}
