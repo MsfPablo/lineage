@@ -130,6 +130,10 @@ func runInit(args []string, home string, stdout, stderr io.Writer) error {
 			fmt.Fprintln(stderr, err)
 			return err
 		}
+		if err := config.ValidateWorkspaceName(args[1]); err != nil {
+			fmt.Fprintln(stderr, err)
+			return err
+		}
 		dir := config.WorkspacePackagesDir(home, args[1])
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			fmt.Fprintln(stderr, err)
