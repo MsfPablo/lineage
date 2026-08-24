@@ -8,15 +8,39 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
-	"github.com/lineage-dev/lineage/internal/config"
-	"github.com/lineage-dev/lineage/internal/materialize"
-	"github.com/lineage-dev/lineage/internal/packages"
-	"github.com/lineage-dev/lineage/internal/provider"
-	"github.com/lineage-dev/lineage/internal/runtime"
-	"github.com/lineage-dev/lineage/internal/shim"
+	"github.com/agentic-lineage/lineage/internal/atomicfile"
+	"github.com/agentic-lineage/lineage/internal/auth"
+	"github.com/agentic-lineage/lineage/internal/config"
+	"github.com/agentic-lineage/lineage/internal/graph"
+	"github.com/agentic-lineage/lineage/internal/materialize"
+	"github.com/agentic-lineage/lineage/internal/packages"
+	"github.com/agentic-lineage/lineage/internal/provider"
+	"github.com/agentic-lineage/lineage/internal/runtime"
+	"github.com/agentic-lineage/lineage/internal/shim"
+	"github.com/agentic-lineage/lineage/internal/snapshot"
 )
+
+// Version is set at build time via
+// -ldflags "-X github.com/agentic-lineage/lineage/internal/cli.Version=vX.Y.Z"
+// (see the release build steps). Defaults to "dev" for a plain `go build`/
+// `go run`/`go install` without that flag, e.g. a local development build.
+var Version = "dev"
+
+// resolveGitHubToken finds the GitHub token that identifies a publisher:
+// LINEAGE_PUBLISH_TOKEN first (the escape hatch for non-interactive use,
+// e.g. CI - set it to any GitHub-issued token with read:user access), then
+// whatever `lineage login` stored locally. Returns "" with no error if
+// neither is set; callers decide how to report that (runWhoAmI and
+// runPackagePublish both need it, with different error messages).
+func resolveGitHubToken(home string) (string, error) {
+	if token := os.Getenv("LINEAGE_PUBLISH_TOKEN"); token != "" {
+		return token, nil
+	}
+	return auth.LoadToken(home)
+}
 
 func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
@@ -30,29 +54,53 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		return err
 	}
 
+	// Wrapped once here, then threaded through as *bufio.Reader rather than
+	// io.Reader, so every confirm() prompt within this single invocation
+	// reads from the same buffer. A command that prompts more than once
+	// (e.g. `add`, which can ask about both enabling and setup) would
+	// otherwise have each confirm() call construct its own bufio.Reader,
+	// silently discarding whatever that call buffered but didn't consume.
+	var in *bufio.Reader
+	if stdin != nil {
+		in = bufio.NewReader(stdin)
+	}
+
 	switch args[0] {
 	case "init":
 		return runInit(args[1:], home, stdout, stderr)
 	case "package":
 		return runPackage(args[1:], home, stdout, stderr)
+	case "add":
+		return runAdd(args[1:], home, in, stdout, stderr)
 	case "enable":
-		return runEnable(args[1:], home, stdout, stderr)
+		return runEnable(args[1:], home, in, stdout, stderr)
 	case "list":
 		return runList(home, stdout, stderr)
 	case "disable":
-		return runDisable(args[1:], home, stdout, stderr)
+		return runDisable(args[1:], home, in, stdout, stderr)
 	case "inspect":
 		return runInspect(args[1:], home, stdout, stderr)
+	case "graph":
+		return runGraph(args[1:], stdout, stderr)
 	case "run":
-		return runProvider(ctx, args[1:], home, stdin, stdout, stderr)
+		return runProvider(ctx, args[1:], home, in, stdout, stderr)
 	case "workflow":
-		return runWorkflow(args[1:], home, stdin, stdout, stderr)
+		return runWorkflow(args[1:], home, in, stdout, stderr)
 	case "install-shims":
 		return runInstallShims(home, stdout, stderr)
 	case "doctor":
 		return runDoctor(home, stdout, stderr)
+	case "login":
+		return runLogin(home, stdout, stderr)
+	case "logout":
+		return runLogout(home, stdout, stderr)
+	case "whoami":
+		return runWhoAmI(home, stdout, stderr)
 	case "help", "-h", "--help":
 		printUsage(stdout)
+		return nil
+	case "version", "-v", "--version":
+		fmt.Fprintf(stdout, "lineage %s\n", Version)
 		return nil
 	default:
 		err := fmt.Errorf("unknown command %q", args[0])
@@ -83,6 +131,10 @@ func runInit(args []string, home string, stdout, stderr io.Writer) error {
 			fmt.Fprintln(stderr, err)
 			return err
 		}
+		if err := config.ValidateWorkspaceName(args[1]); err != nil {
+			fmt.Fprintln(stderr, err)
+			return err
+		}
 		dir := config.WorkspacePackagesDir(home, args[1])
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			fmt.Fprintln(stderr, err)
@@ -97,15 +149,54 @@ func runInit(args []string, home string, stdout, stderr io.Writer) error {
 	}
 }
 
+// packageUsage is shown for `lineage package` with no subcommand, and for
+// `lineage package -h`/`--help`. Each subcommand also answers its own
+// `-h`/`--help` with a one-line usage plus a short description - see
+// isHelpFlag's call sites below.
+const packageUsage = `usage: lineage package <command> [arguments]
+
+Commands:
+  init <name>                     scaffold a new package
+  validate <path>                 check schema, safety, and exports
+  export <path> [-o file.tgz]     write a deterministic archive
+  import <file.tgz> [--as name]   install an archive locally
+  publish <path>                  publish to the Lineage registry
+  pull <ref> [--as name]          fetch a published package
+
+Run 'lineage package <command> --help' for details on one command.`
+
+// isHelpFlag reports whether s is a bare -h/--help flag, so a subcommand
+// can answer "-h" with its own usage instead of trying to use it as a
+// path/name argument (which would otherwise fail with a confusing
+// filesystem or validation error).
+func isHelpFlag(s string) bool {
+	return s == "-h" || s == "--help"
+}
+
+// is there a help flag anywhere in this command's arguments?
+func hasHelpFlag(args []string) bool {
+	return slices.ContainsFunc(args, isHelpFlag)
+}
+
 func runPackage(args []string, home string, stdout, stderr io.Writer) error {
+	//   Can't call hasHelpFlag here, otherwise general lineage package help
+	// would be printed
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, packageUsage)
+		return nil
+	}
 	if len(args) < 2 {
-		err := fmt.Errorf("usage: lineage package init <name> | lineage package validate <path> | lineage package export <path> [-o file.tgz] | lineage package import <file.tgz> [--as name]")
+		err := fmt.Errorf("usage: lineage package init <name> | lineage package validate <path> | lineage package export <path> [-o file.tgz] | lineage package import <file.tgz> [--as name] | lineage package publish <path> | lineage package pull <package-ref> [--as name]")
 		fmt.Fprintln(stderr, err)
 		return err
 	}
 
 	switch args[0] {
 	case "init":
+		if hasHelpFlag(args[1:]) {
+			fmt.Fprintln(stdout, "usage: lineage package init <name>\n\nScaffold a new package: lineage.yaml plus the standard skills/workflows/agents/policies/references/adapters folders.")
+			return nil
+		}
 		if len(args) != 2 {
 			err := fmt.Errorf("usage: lineage package init <name>")
 			fmt.Fprintln(stderr, err)
@@ -120,16 +211,38 @@ func runPackage(args []string, home string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "initialized package %s\n", dir)
 		return nil
 	case "validate":
-		if len(args) != 2 {
-			err := fmt.Errorf("usage: lineage package validate <path>")
+		if hasHelpFlag(args[1:]) {
+			fmt.Fprintln(stdout, "usage: lineage package validate <path> [--yaml]\n\nCheck manifest schema, export authority, entrypoint path safety, and scan for secrets - without enabling or writing anything. --yaml prints a stable, provider-independent structured report instead of the human-readable summary.")
+			return nil
+		}
+		path := ""
+		yamlOutput := false
+		for _, a := range args[1:] {
+			if a == "--yaml" {
+				yamlOutput = true
+				continue
+			}
+			if path != "" {
+				err := fmt.Errorf("usage: lineage package validate <path> [--yaml]")
+				fmt.Fprintln(stderr, err)
+				return err
+			}
+			path = a
+		}
+		if path == "" {
+			err := fmt.Errorf("usage: lineage package validate <path> [--yaml]")
 			fmt.Fprintln(stderr, err)
 			return err
 		}
-		return runPackageValidate(filepath.Clean(args[1]), stdout, stderr)
+		return runPackageValidate(filepath.Clean(path), yamlOutput, stdout, stderr)
 	case "export":
 		return runPackageExport(args[1:], stdout, stderr)
 	case "import":
 		return runPackageImport(args[1:], home, stdout, stderr)
+	case "publish":
+		return runPackagePublish(args[1:], home, stdout, stderr)
+	case "pull":
+		return runPackagePull(args[1:], home, stdout, stderr)
 	default:
 		err := fmt.Errorf("unknown package command %q", args[0])
 		fmt.Fprintln(stderr, err)
@@ -137,7 +250,91 @@ func runPackage(args []string, home string, stdout, stderr io.Writer) error {
 	}
 }
 
+func runPackagePublish(args []string, home string, stdout, stderr io.Writer) error {
+	if hasHelpFlag(args) {
+		fmt.Fprintln(stdout, "usage: lineage package publish <path>\n\nValidate and publish a package to the Lineage registry, identified by the GitHub login from `lineage login` (or LINEAGE_PUBLISH_TOKEN). The first publish of a name claims it; later publishes need the same identity.")
+		return nil
+	}
+	if len(args) != 1 {
+		err := fmt.Errorf("usage: lineage package publish <path>")
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	token, err := resolveGitHubToken(home)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+	if token == "" {
+		err := fmt.Errorf("not logged in; run `lineage login` first, or set LINEAGE_PUBLISH_TOKEN for non-interactive use")
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	cfg := packages.RegistryConfig{URL: os.Getenv("LINEAGE_REGISTRY_URL"), Token: token}
+	result, err := packages.Publish(filepath.Clean(args[0]), cfg)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	if result.AlreadyPublished {
+		fmt.Fprintf(stdout, "%s@%s is already published with this content (digest %s); nothing to do\n", result.Name, result.Version, result.Digest)
+		return nil
+	}
+	fmt.Fprintf(stdout, "published %s@%s (digest %s)\n", result.Name, result.Version, result.Digest)
+	return nil
+}
+
+func runPackagePull(args []string, home string, stdout, stderr io.Writer) error {
+	if hasHelpFlag(args) {
+		fmt.Fprintln(stdout, "usage: lineage package pull <package-ref> [--as name]\n\nFetch a published package (ref is \"name\" for the latest version, or an exact \"name@version\") and verify its content digest. An unauthenticated read - no login needed.")
+		return nil
+	}
+	if len(args) < 1 {
+		err := fmt.Errorf("usage: lineage package pull <package-ref> [--as name]")
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	ref := args[0]
+	asName := ""
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--as" && i+1 < len(args) {
+			asName = args[i+1]
+			i++
+			continue
+		}
+		err := fmt.Errorf("usage: lineage package pull <package-ref> [--as name]")
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	destParent := config.UserPackagesDir(home)
+	if err := os.MkdirAll(destParent, 0o755); err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	// Pull is an unauthenticated read - the registry doesn't gate who can
+	// fetch a published package, only who can publish one.
+	cfg := packages.RegistryConfig{URL: os.Getenv("LINEAGE_REGISTRY_URL")}
+	name, err := packages.Pull(ref, cfg, destParent, asName)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	fmt.Fprintf(stdout, "pulled package %s into %s\n", name, filepath.Join(destParent, name))
+	return nil
+}
+
 func runPackageImport(args []string, home string, stdout, stderr io.Writer) error {
+	if hasHelpFlag(args) {
+		fmt.Fprintln(stdout, "usage: lineage package import <file.tgz> [--as name]\n\nExtract an exported archive into the user packages directory, re-validating it as untrusted input. Never overwrites an existing package; use --as to import under a different name.")
+		return nil
+	}
 	if len(args) < 1 {
 		err := fmt.Errorf("usage: lineage package import <file.tgz> [--as name]")
 		fmt.Fprintln(stderr, err)
@@ -181,6 +378,10 @@ func runPackageImport(args []string, home string, stdout, stderr io.Writer) erro
 }
 
 func runPackageExport(args []string, stdout, stderr io.Writer) error {
+	if hasHelpFlag(args) {
+		fmt.Fprintln(stdout, "usage: lineage package export <path> [-o file.tgz]\n\nWrite a deterministic .tgz archive of the package after running the same checks as validate. Refuses to export a package that fails validation.")
+		return nil
+	}
 	if len(args) < 1 {
 		err := fmt.Errorf("usage: lineage package export <path> [-o file.tgz]")
 		fmt.Fprintln(stderr, err)
@@ -200,29 +401,35 @@ func runPackageExport(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	if outPath == "" {
-		manifest, err := packages.LoadManifest(dir)
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return err
-		}
-		outPath = fmt.Sprintf("%s-%s.tgz", manifest.Name, manifest.Version)
-	}
-
-	f, err := os.Create(outPath)
+	report, err := packages.Validate(dir)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
 	}
-
-	if err := packages.Export(dir, f); err != nil {
-		f.Close()
-		os.Remove(outPath)
+	portability := packages.NewPortabilityReport(report)
+	packages.WritePortabilityReport(stdout, portability)
+	if portability.HasBlockers() {
+		err := fmt.Errorf("package has unresolved portability blockers, refusing to export (%d blocker(s)); run `lineage package validate` for details", len(portability.Blockers))
 		fmt.Fprintln(stderr, err)
 		return err
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(outPath)
+
+	if outPath == "" {
+		outPath = fmt.Sprintf("%s-%s.tgz", report.Manifest.Name, report.Manifest.Version)
+	}
+
+	f, err := atomicfile.Create(outPath, 0o644)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+	defer f.Close()
+
+	if err := packages.Export(dir, f); err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+	if err := f.Commit(); err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
 	}
@@ -231,11 +438,34 @@ func runPackageExport(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func runPackageValidate(dir string, stdout, stderr io.Writer) error {
+func runPackageValidate(dir string, yamlOutput bool, stdout, stderr io.Writer) error {
 	report, err := packages.Validate(dir)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return err
+	}
+
+	if yamlOutput {
+		// Best-effort: a package failing validation in a way that also
+		// breaks discovery (a traversing entrypoint, a declared-but-missing
+		// export) won't have one, and validateReport omits
+		// skills/workflows/agents/policies rather than guessing - the
+		// report's own errors already explain why.
+		discovered, discoverErr := packages.Discover(dir)
+		var discoveredPtr *packages.Package
+		if discoverErr == nil {
+			discoveredPtr = &discovered
+		}
+		if writeErr := writeYAML(stdout, validateReport(report, discoveredPtr)); writeErr != nil {
+			fmt.Fprintln(stderr, writeErr)
+			return writeErr
+		}
+		if !report.Passed() {
+			err := fmt.Errorf("package validation failed with %d error(s)", len(report.Errors))
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		return nil
 	}
 
 	fmt.Fprintf(stdout, "package: %s@%s (schema %d)\n", report.Manifest.Name, report.Manifest.Version, report.Manifest.Schema)
@@ -243,6 +473,7 @@ func runPackageValidate(dir string, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "capabilities:\n")
 	fmt.Fprintf(stdout, "  filesystem.read: %s\n", listValue(report.Manifest.Capabilities.Filesystem.Read))
 	fmt.Fprintf(stdout, "  network: %s\n", listValue(report.Manifest.Capabilities.Network))
+	packages.WritePortabilityReport(stdout, packages.NewPortabilityReport(report))
 
 	if len(report.Notes) > 0 {
 		fmt.Fprintf(stdout, "notes:\n")
@@ -280,17 +511,58 @@ func emptyValue(value string) string {
 	return value
 }
 
-func runEnable(args []string, home string, stdout, stderr io.Writer) error {
-	if len(args) != 1 {
-		err := fmt.Errorf("usage: lineage enable <package-path-or-id>")
+// describeSuffix formats a setup item's optional description for the
+// setup plan printout: " - <description>" if present, otherwise nothing.
+func describeSuffix(description string) string {
+	if description == "" {
+		return ""
+	}
+	return " - " + description
+}
+
+func runEnable(args []string, home string, stdin *bufio.Reader, stdout, stderr io.Writer) error {
+	if hasHelpFlag(args) {
+		fmt.Fprintln(stdout, "usage: lineage enable <package-path-or-id> [--yes]\n\nEnable a package in the current project. If the package declares setup - tracker files or directories its workflow expects - shows the plan and asks permission before creating anything; --yes skips that prompt.")
+		return nil
+	}
+	ref := ""
+	autoApprove := false
+	for _, a := range args {
+		if a == "--yes" || a == "-y" {
+			autoApprove = true
+			continue
+		}
+		if ref != "" {
+			err := fmt.Errorf("usage: lineage enable <package-path-or-id> [--yes]")
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		ref = a
+	}
+	if ref == "" {
+		err := fmt.Errorf("usage: lineage enable <package-path-or-id> [--yes]")
 		fmt.Fprintln(stderr, err)
 		return err
 	}
+	_, err := enableRef(ref, home, autoApprove, stdin, stdout, stderr)
+	return err
+}
 
+// enableRef is runEnable's actual work, factored out so `lineage add`
+// (which pulls a package and then enables it in one command) shares the
+// exact same project-root resolution, dependency validation, and setup
+// handling instead of a second, drifting implementation.
+//
+// The bool return reports whether the package actually ended up enabled: a
+// declined setup prompt is not an error (enableRef already printed why and
+// left the workspace unchanged), but it is also not success - callers like
+// runAdd need to tell the two apart instead of treating "no error" as
+// "enabled" and reporting readiness for a package that was never turned on.
+func enableRef(ref, home string, autoApprove bool, stdin *bufio.Reader, stdout, stderr io.Writer) (bool, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
 	}
 
 	// Reuse the project config an enclosing `lineage run` would find (it
@@ -308,10 +580,8 @@ func runEnable(args []string, home string, stdout, stderr io.Writer) error {
 		cfg = found.Config
 	} else if !errors.Is(err, config.ErrProjectConfigNotFound) {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
 	}
-
-	ref := args[0]
 
 	// A "./" or "../" style ref is relative to where the user typed it
 	// (cwd), matching the documented `lineage enable ./resume-workflow`
@@ -327,7 +597,7 @@ func runEnable(args []string, home string, stdout, stderr io.Writer) error {
 	resolvedPath, err := packages.ResolveReference(home, cfg.Workspace, resolveRoot, ref)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
 	}
 
 	// The config we're about to save lives at the project root, and
@@ -357,19 +627,235 @@ func runEnable(args []string, home string, stdout, stderr io.Writer) error {
 	resolvedForValidation, err := packages.ResolveEnabled(home, cfg.Workspace, projectRoot, newEnabled)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
 	}
 	if err := packages.ValidateDependencies(resolvedForValidation); err != nil {
 		fmt.Fprintln(stderr, err)
-		return err
+		return false, err
+	}
+
+	// A package can declare local setup (#72) - tracker files or
+	// directories its workflow expects to exist. Show exactly what would
+	// be created and get permission before writing anything; declining
+	// leaves the workspace completely unchanged, same as declining to
+	// enable at all, rather than enabling into a half-set-up state.
+	manifest, err := packages.LoadManifest(resolvedPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return false, err
+	}
+	setupPlan, err := packages.PlanSetup(projectRoot, manifest.Setup)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return false, err
+	}
+	if setupPlan.NeedsAction() {
+		fmt.Fprintf(stdout, "%s wants to set up:\n", manifest.Name)
+		for _, f := range setupPlan.Files {
+			if f.Exists {
+				continue
+			}
+			fmt.Fprintf(stdout, "  create file %s%s\n", f.Path, describeSuffix(f.Description))
+		}
+		for _, d := range setupPlan.Directories {
+			if d.Exists {
+				continue
+			}
+			fmt.Fprintf(stdout, "  create directory %s%s\n", d.Path, describeSuffix(d.Description))
+		}
+		if !autoApprove {
+			fmt.Fprint(stdout, "Create these? [y/N] ")
+			if !confirm(stdin) {
+				fmt.Fprintln(stdout, "not enabled - setup was declined. Nothing was created or changed.")
+				return false, nil
+			}
+		}
+		if err := packages.ApplySetup(projectRoot, setupPlan); err != nil {
+			fmt.Fprintln(stderr, err)
+			return false, err
+		}
+		fmt.Fprintln(stdout, "setup complete.")
+	}
+
+	// Everything from here on must succeed before config is saved: once
+	// SaveProjectConfig runs, the package is durably marked enabled, so any
+	// step that can still fail (digest computation, the snapshot, the graph
+	// append) has to happen first. Otherwise a failure here - e.g. a
+	// corrupt .lineage/graph.json from an earlier partial write - would
+	// report enable as failed while having already left the package
+	// enabled in config, with no way back short of manually editing the
+	// file.
+
+	// Record that this project's local environment now descends from
+	// manifest, so `lineage graph list` can later explain where it came
+	// from (#6). Digest is recomputed here (ComputeDigest, the same
+	// identity Pull/Import verify against) rather than reusing a value
+	// from earlier resolution, since enableRef never needed it until now.
+	digest, err := packages.ComputeDigest(resolvedPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return false, err
+	}
+
+	// Also take a durable, content-addressed snapshot of exactly what was
+	// enabled (#7), so the graph record below can point at something that
+	// can later be inspected, copied, or reconstructed byte-for-byte
+	// instead of only naming a version.
+	_, snapshotID, err := snapshot.Create(home, resolvedPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return false, err
+	}
+
+	if _, err := graph.Append(projectRoot, graph.Record{
+		Event: "enable",
+		Parent: graph.ParentRef{
+			Name:       manifest.Name,
+			Version:    manifest.Version,
+			Digest:     digest,
+			SnapshotID: string(snapshotID),
+		},
+		Descendant: graph.DescendantRef{
+			Workspace: cfg.Workspace,
+		},
+	}); err != nil {
+		fmt.Fprintln(stderr, err)
+		return false, err
 	}
 
 	cfg.EnabledPackages = newEnabled
 	if err := config.SaveProjectConfig(configPath, cfg); err != nil {
 		fmt.Fprintln(stderr, err)
+		return false, err
+	}
+
+	fmt.Fprintf(stdout, "enabled package %s in %s\n", storedRef, configPath)
+	return true, nil
+}
+
+// runAdd is the one-command receiver path (#77): pull a published package,
+// show what it contains, ask permission, then enable it - fetch, inspect,
+// and enable in one step instead of three separate commands. This is what
+// the bootstrap prompt (#98) and `lineage add`'s own direct users both
+// build on.
+// importAddSource brings ref into destParent as an extracted, digest-
+// verified package directory, converging local .tgz archives and registry
+// refs on the exact same shape before the shared inspect -> confirm ->
+// enable pipeline in runAdd ever runs (#71) - nothing past this point
+// cares which kind of source a package came from. action names what
+// actually happened ("fetched", "imported", or "already have") so runAdd
+// can report it accurately instead of always claiming to have fetched.
+//
+// Re-running add for a package already present locally is a deliberate
+// no-op, not a failure: Import/Pull both refuse to overwrite an existing
+// package directory, so a second run would otherwise error even though
+// nothing is wrong. This treats that specific error as success as long as
+// the content matches (digests equal) - a genuine conflict, the same
+// name/version now resolving to different content, still fails loudly
+// instead of silently keeping the stale local copy.
+func importAddSource(ref, destParent string) (name, action string, err error) {
+	if info, statErr := os.Stat(ref); statErr == nil && !info.IsDir() {
+		f, openErr := os.Open(ref)
+		if openErr != nil {
+			return "", "", openErr
+		}
+		defer f.Close()
+		name, err = packages.Import(f, destParent, "")
+		action = "imported"
+	} else {
+		cfg := packages.RegistryConfig{URL: os.Getenv("LINEAGE_REGISTRY_URL")}
+		name, err = packages.Pull(ref, cfg, destParent, "")
+		action = "fetched"
+	}
+
+	var already *packages.ErrAlreadyImported
+	if errors.As(err, &already) {
+		existingDigest, digestErr := packages.ComputeDigest(already.Dest)
+		if digestErr == nil && existingDigest == already.Digest {
+			return already.Name, "already have", nil
+		}
+		if digestErr == nil {
+			return "", "", fmt.Errorf("package %q already exists locally with different content (local digest %s, requested digest %s); remove %s first if you want to replace it", already.Name, existingDigest, already.Digest, already.Dest)
+		}
+	}
+	return name, action, err
+}
+
+func runAdd(args []string, home string, stdin *bufio.Reader, stdout, stderr io.Writer) error {
+	if hasHelpFlag(args) {
+		fmt.Fprintln(stdout, "usage: lineage add <package-ref> [--yes]\n\nFetch a published package, show what it contains, ask permission, then enable it in the current project - the one-command receiver path. <package-ref> is a registry ref (name or name@version), or the path to a local .tgz archive from `lineage package export`.")
+		return nil
+	}
+	if len(args) < 1 {
+		err := fmt.Errorf("usage: lineage add <package-ref> [--yes]")
+		fmt.Fprintln(stderr, err)
 		return err
 	}
-	fmt.Fprintf(stdout, "enabled package %s in %s\n", storedRef, configPath)
+
+	ref := args[0]
+	autoApprove := false
+	for _, a := range args[1:] {
+		if a == "--yes" || a == "-y" {
+			autoApprove = true
+			continue
+		}
+		err := fmt.Errorf("usage: lineage add <package-ref> [--yes]")
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	destParent := config.UserPackagesDir(home)
+	if err := os.MkdirAll(destParent, 0o755); err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	name, action, err := importAddSource(ref, destParent)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	pkg, err := packages.Discover(filepath.Join(destParent, name))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return err
+	}
+
+	fmt.Fprintf(stdout, "%s %s@%s\n", action, pkg.Manifest.Name, pkg.Manifest.Version)
+	fmt.Fprintf(stdout, "digest: %s\n", emptyValue(pkg.Digest))
+	if pkg.Manifest.Description != "" {
+		fmt.Fprintf(stdout, "description: %s\n", pkg.Manifest.Description)
+	}
+	fmt.Fprintf(stdout, "skills: %s\n", listValue(pkg.Skills))
+	fmt.Fprintf(stdout, "workflows: %s\n", listValue(pkg.Workflows))
+	fmt.Fprintf(stdout, "agents: %s\n", listValue(pkg.Agents))
+	fmt.Fprintf(stdout, "policies: %s\n", listValue(pkg.Policies))
+	fmt.Fprintf(stdout, "capabilities:\n")
+	fmt.Fprintf(stdout, "  filesystem.read: %s\n", listValue(pkg.Manifest.Capabilities.Filesystem.Read))
+	fmt.Fprintf(stdout, "  network: %s\n", listValue(pkg.Manifest.Capabilities.Network))
+
+	if !autoApprove {
+		fmt.Fprint(stdout, "\nEnable this package in the current project? [y/N] ")
+		if !confirm(stdin) {
+			fmt.Fprintf(stdout, "not enabled. It's still available locally - run `lineage enable %s` when you're ready.\n", name)
+			return nil
+		}
+	}
+
+	fmt.Fprintln(stdout)
+	enabled, err := enableRef(name, home, autoApprove, stdin, stdout, stderr)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		// enableRef already explained why (a declined setup prompt) and
+		// left the workspace unchanged - reporting readiness here would
+		// tell the user to run a package that was never actually enabled.
+		return nil
+	}
+
+	fmt.Fprintf(stdout, "\nReady. Run `lineage run <%s>` to use it.\n", providerNameList())
 	return nil
 }
 
@@ -401,13 +887,30 @@ func runList(home string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func runDisable(args []string, home string, stdout, stderr io.Writer) error {
-	if len(args) != 1 {
-		err := fmt.Errorf("usage: lineage disable <package-path-or-id>")
+func runDisable(args []string, home string, stdin *bufio.Reader, stdout, stderr io.Writer) error {
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		fmt.Fprintln(stdout, "usage: lineage disable <package-path-or-id> [--yes]\n\nDisable a package and re-materialize every provider that has ever run in this project, so the packages it staged are actually removed. Asks for confirmation before re-materializing unless --yes is passed.")
+		return nil
+	}
+	ref := ""
+	autoApprove := false
+	for _, a := range args {
+		if a == "--yes" || a == "-y" {
+			autoApprove = true
+			continue
+		}
+		if ref != "" {
+			err := fmt.Errorf("usage: lineage disable <package-path-or-id> [--yes]")
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		ref = a
+	}
+	if ref == "" {
+		err := fmt.Errorf("usage: lineage disable <package-path-or-id> [--yes]")
 		fmt.Fprintln(stderr, err)
 		return err
 	}
-	ref := args[0]
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -445,6 +948,8 @@ func runDisable(args []string, home string, stdout, stderr io.Writer) error {
 	// anything no longer desired. A provider that was never materialized
 	// here doesn't get a state file created just because something else
 	// was disabled.
+	var pending []provider.Provider
+	needsApproval := false
 	for _, p := range provider.Known() {
 		hasState, err := materialize.HasState(found.Root, p.Name)
 		if err != nil {
@@ -454,6 +959,36 @@ func runDisable(args []string, home string, stdout, stderr io.Writer) error {
 		if !hasState {
 			continue
 		}
+		pending = append(pending, p)
+		na, err := materialize.NeedsApproval(found.Root, p, resolved)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		if na {
+			needsApproval = true
+		}
+	}
+
+	// Re-materializing rewrites every provider's staged content, not just
+	// the package being disabled - the same "explicit confirmation before
+	// anything is written" gate `run`/`workflow run` already use, since
+	// this can otherwise silently rewrite other, still-enabled packages'
+	// staged content as a side effect of disabling one.
+	if needsApproval && !autoApprove {
+		names := make([]string, len(pending))
+		for i, p := range pending {
+			names[i] = p.Name
+		}
+		fmt.Fprintf(stdout, "Disabling %s will re-materialize the remaining enabled packages for: %s\n", ref, strings.Join(names, ", "))
+		fmt.Fprint(stdout, "Proceed? [y/N] ")
+		if !confirm(stdin) {
+			fmt.Fprintln(stdout, "aborted: disable was not approved. Nothing was changed.")
+			return nil
+		}
+	}
+
+	for _, p := range pending {
 		if err := materialize.Apply(found.Root, p, resolved); err != nil {
 			fmt.Fprintln(stderr, err)
 			return err
@@ -470,12 +1005,29 @@ func runDisable(args []string, home string, stdout, stderr io.Writer) error {
 }
 
 func runInspect(args []string, home string, stdout, stderr io.Writer) error {
-	if len(args) != 1 {
-		err := fmt.Errorf("usage: lineage inspect <package-path-or-id>")
+	if hasHelpFlag(args) {
+		fmt.Fprintln(stdout, "usage: lineage inspect <package-path-or-id> [--yaml]\n\nShow a package's contents. --yaml prints a stable, provider-independent structured report instead of the human-readable summary.")
+		return nil
+	}
+	ref := ""
+	yamlOutput := false
+	for _, a := range args {
+		if a == "--yaml" {
+			yamlOutput = true
+			continue
+		}
+		if ref != "" {
+			err := fmt.Errorf("usage: lineage inspect <package-path-or-id> [--yaml]")
+			fmt.Fprintln(stderr, err)
+			return err
+		}
+		ref = a
+	}
+	if ref == "" {
+		err := fmt.Errorf("usage: lineage inspect <package-path-or-id> [--yaml]")
 		fmt.Fprintln(stderr, err)
 		return err
 	}
-	ref := args[0]
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -514,6 +1066,10 @@ func runInspect(args []string, home string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	if yamlOutput {
+		return writeYAML(stdout, inspectReport(pkg))
+	}
+
 	fmt.Fprintf(stdout, "package: %s@%s (schema %d)\n", pkg.Manifest.Name, pkg.Manifest.Version, pkg.Manifest.Schema)
 	fmt.Fprintf(stdout, "path: %s\n", pkg.Path)
 	fmt.Fprintf(stdout, "digest: %s\n", emptyValue(pkg.Digest))
@@ -531,7 +1087,7 @@ func runInspect(args []string, home string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func runProvider(ctx context.Context, args []string, home string, stdin io.Reader, stdout, stderr io.Writer) error {
+func runProvider(ctx context.Context, args []string, home string, stdin *bufio.Reader, stdout, stderr io.Writer) error {
 	_ = ctx
 	if len(args) == 0 {
 		err := fmt.Errorf("usage: lineage run <%s> [--dry-run] [--yes] [-- provider args...]", providerNameList())
@@ -598,7 +1154,7 @@ func runProvider(ctx context.Context, args []string, home string, stdin io.Reade
 	return nil
 }
 
-func runWorkflow(args []string, home string, stdin io.Reader, stdout, stderr io.Writer) error {
+func runWorkflow(args []string, home string, stdin *bufio.Reader, stdout, stderr io.Writer) error {
 	usage := fmt.Errorf("usage: lineage workflow run <workflow-name> <%s> [--dry-run] [--yes] [-- provider args...]", providerNameList())
 	if len(args) < 3 || args[0] != "run" {
 		fmt.Fprintln(stderr, usage)
@@ -700,11 +1256,19 @@ func workflowPlanString(wf packages.Workflow, pkg packages.Package, providerName
 // affirmative answer ("y" or "yes", case-insensitive). Anything else,
 // including EOF or a nil reader, is treated as a decline - approval must be
 // explicit.
-func confirm(stdin io.Reader) bool {
+//
+// Takes the caller's own *bufio.Reader rather than wrapping an io.Reader
+// itself: a command that prompts more than once in one run (e.g. `add`,
+// which can ask about both enabling and setup) must read successive lines
+// off the same buffer. Constructing a fresh bufio.Reader per call would
+// silently discard whatever the previous call had already buffered but not
+// consumed if a single Read from stdin returned more than one line's worth
+// of bytes at once - the exact shape piped/scripted stdin takes.
+func confirm(stdin *bufio.Reader) bool {
 	if stdin == nil {
 		return false
 	}
-	line, err := bufio.NewReader(stdin).ReadString('\n')
+	line, err := stdin.ReadString('\n')
 	if err != nil && line == "" {
 		return false
 	}
@@ -818,23 +1382,45 @@ func pathIndexOf(pathEntries []string, dir string) int {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, strings.TrimSpace(fmt.Sprintf(`
-Lineage shareable agent runtime
+Lineage - package a working agent setup, share it, and run it through your
+own Claude or Codex.
 
 Usage:
-  lineage init user
-  lineage init workspace <name>
-  lineage package init <name>
-  lineage package validate <path>
-  lineage package export <path> [-o file.tgz]
-  lineage package import <file.tgz> [--as name]
-  lineage enable <package-path-or-id>
-  lineage disable <package-path-or-id>
-  lineage list
-  lineage inspect <package-path-or-id>
-  lineage run <%s> [--dry-run] [--yes] [-- provider args...]
-  lineage doctor
-  lineage workflow run <workflow-name> <%s> [--dry-run] [--yes] [-- provider args...]
-  lineage install-shims
+  lineage <command> [arguments]
+
+Package authoring:
+  package init <name>                     scaffold a new package
+  package validate <path> [--yaml]         check schema, safety, and exports
+  package export <path> [-o file.tgz]     write a deterministic archive
+  package import <file.tgz> [--as name]   install an archive locally
+
+Registry:
+  add <ref> [--yes]                       fetch, inspect, and enable a package in one step
+  login                                   authorize with GitHub (device flow)
+  logout                                  clear the stored credential
+  whoami                                  show who publish/pull will act as
+  package publish <path>                  publish to the Lineage registry
+  package pull <ref> [--as name]          fetch a published package
+
+Using a package:
+  enable <path-or-id> [--yes]              add a package to this project
+  disable <path-or-id>                    remove a package from this project
+  list                                    show enabled packages
+  inspect <path-or-id> [--yaml]            show a package's contents
+  graph list [--yaml]                      show what this project's state descends from
+  run <%s> [--dry-run] [--yes]  launch a provider with packages applied
+  workflow run <name> <%s>      run one declared workflow
+
+Setup:
+  init user                               create the user package directory
+  init workspace <name>                   create a shared workspace
+  install-shims                           put lineage in front of claude/codex on PATH
+  doctor                                  check config, PATH, and provider setup
+
+  -h, --help                              show this help
+  -v, --version                           show the CLI version
+
+Run 'lineage package --help' or 'lineage <command> --help' for details on one command.
 `, providerNameList(), providerNameList())))
 }
 

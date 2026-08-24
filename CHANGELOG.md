@@ -5,6 +5,9 @@ All notable changes to Lineage will be documented here.
 ## Unreleased
 
 - Initial local agent package runtime scaffold.
+- Refreshed public-facing documentation for the current registry, `lineage add`,
+  workflow, inspect/list/doctor, and bootstrap-prompt surfaces; added a public
+  docs sync checklist for README/Wiki/website/package-page drift.
 - Project, user, and workspace package configuration.
 - Package initialization and discovery.
 - Provider launch planning and local shims.
@@ -140,3 +143,42 @@ All notable changes to Lineage will be documented here.
 - Fixed a rendering bug where `lineage help`/usage output for several
   commands contained literal tab characters instead of consistent
   indentation.
+- Added `lineage package publish <path>` and `lineage package pull
+  <package-ref> [--as name]` against the Lineage registry (the
+  `landing/` website's `api/`, backed by a private GitHub repo used
+  purely as artifact storage — see `docs/decisions/
+  0012-v1-distribution-contract-and-receiver-activation.md`). Publish
+  reuses the same Validate-then-Export path as `package export` and
+  refuses to publish anything that fails validation; publishing the
+  same `name@version` twice with identical content is a no-op,
+  publishing it with different content is rejected — published
+  versions are immutable. Pull resolves a ref (`name` for latest, or
+  an exact `name@version`), imports it exactly like `package import`,
+  and then independently recomputes the content digest from what was
+  actually imported, failing closed and discarding the import if it
+  doesn't match what the registry reported. Registry location and the
+  publish token are read from `LINEAGE_REGISTRY_URL`/
+  `LINEAGE_PUBLISH_TOKEN`, not `.lineage/config.yaml` — a publish
+  credential is a per-invocation secret, not committed project state.
+- The registry now records who published each package (a publish token
+  maps to a publisher id) and enforces that only the same publisher can
+  push a new version of a name they already own — publishing an update
+  is a normal `lineage package publish` with a bumped `version` and the
+  same token; a different publisher's token is rejected.
+- Publish is now safe to interrupt and retry: since publish is commonly
+  run by an agent on someone's behalf and that agent's own session can
+  end mid-command, the registry creates the GitHub Release as a draft,
+  uploads the archive, and only then finalizes it — a publish cut off
+  in between is invisible to receivers and resumed, not duplicated or
+  errored on, by simply retrying the same publish call. CLI-side error
+  messages from a failed publish/pull now surface the registry's own
+  error text instead of a raw JSON body.
+- `lineage enable` now records a local lineage graph entry
+  (`.lineage/graph.json`) noting which package a project's state
+  descends from; `lineage graph list [--yaml]` shows the recorded
+  history for the current project.
+- Added a content-addressed, immutable snapshot store
+  (`~/.lineage/objects/`, `~/.lineage/snapshots/`): `lineage enable` now
+  also takes a durable snapshot of exactly what was enabled, and links
+  it to the graph entry above via `snapshot_id`. Identical file content
+  is stored once regardless of how many packages/versions reference it.

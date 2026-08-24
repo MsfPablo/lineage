@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/lineage-dev/lineage/internal/cli"
+	"github.com/agentic-lineage/lineage/internal/cli"
 )
 
 func main() {

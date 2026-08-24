@@ -1,0 +1,225 @@
+package packages
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// DefaultRegistryURL is used when LINEAGE_REGISTRY_URL isn't set. It points
+// at the Lineage website's package API (docs/decisions/
+// 0012-v1-distribution-contract-and-receiver-activation.md), which is
+// itself a thin proxy in front of a private GitHub repo used as artifact
+// storage - the registry API is the only interface this file talks to.
+//
+// This is the actual deployed domain (priyam-jain-2002/lineagelanding on
+// Vercel), not a placeholder - update it if a custom domain is ever
+// attached in front of that deployment.
+const DefaultRegistryURL = "https://agenticlineage.vercel.app"
+
+// RegistryConfig is read from the environment by CLI commands, not stored
+// in .lineage/config.yaml: a publish token is a per-invocation secret, not
+// committed project state.
+type RegistryConfig struct {
+	URL   string
+	Token string
+}
+
+func (c RegistryConfig) baseURL() string {
+	if c.URL != "" {
+		return strings.TrimRight(c.URL, "/")
+	}
+	return DefaultRegistryURL
+}
+
+// registryRequestTimeout bounds a single registry request end to end,
+// including reading the response body. Without it a hung or slow-drip
+// registry response stalls the command indefinitely with no way out but
+// Ctrl-C.
+const registryRequestTimeout = 60 * time.Second
+
+// registryClient returns the HTTP client every registry call uses, so
+// publish, metadata resolution, and archive download share one timeout
+// policy rather than some of them falling back to http.DefaultClient.
+func registryClient() *http.Client {
+	return &http.Client{Timeout: registryRequestTimeout}
+}
+
+type PublishResult struct {
+	Name             string
+	Version          string
+	Digest           string
+	AlreadyPublished bool
+}
+
+// Publish validates dir the same way Export does, then uploads the
+// resulting archive to the registry. It refuses to run against a package
+// that fails Validate for the same reason Export does: publish is exactly
+// the moment package content starts moving to other machines.
+func Publish(dir string, cfg RegistryConfig) (PublishResult, error) {
+	report, err := Validate(dir)
+	if err != nil {
+		return PublishResult{}, err
+	}
+	portability := NewPortabilityReport(report)
+	if portability.HasBlockers() {
+		return PublishResult{}, fmt.Errorf("package has unresolved portability blockers, refusing to publish (%d blocker(s)); run `lineage package validate` for details", len(portability.Blockers))
+	}
+	if cfg.Token == "" {
+		return PublishResult{}, fmt.Errorf("no publish token configured; set LINEAGE_PUBLISH_TOKEN")
+	}
+
+	var buf bytes.Buffer
+	if err := Export(dir, &buf); err != nil {
+		return PublishResult{}, err
+	}
+
+	q := url.Values{}
+	q.Set("name", report.Manifest.Name)
+	q.Set("version", report.Manifest.Version)
+	q.Set("digest", report.Digest)
+	if report.Manifest.Description != "" {
+		q.Set("description", report.Manifest.Description)
+	}
+	// Provider compatibility and capabilities are already public,
+	// declarative information (visible to anyone running `lineage package
+	// validate` against the archive itself) - sending them lets a receiver
+	// see what a package targets and asks for before ever pulling it,
+	// rounding out #69's original directory scope (#90).
+	if entrypoints, err := json.Marshal(report.Manifest.Entrypoints); err == nil {
+		q.Set("entrypoints", string(entrypoints))
+	}
+	if capabilities, err := json.Marshal(report.Manifest.Capabilities); err == nil {
+		q.Set("capabilities", string(capabilities))
+	}
+
+	req, err := http.NewRequest(http.MethodPost, cfg.baseURL()+"/api/publish?"+q.Encode(), &buf)
+	if err != nil {
+		return PublishResult{}, fmt.Errorf("build publish request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/gzip")
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+
+	resp, err := registryClient().Do(req)
+	if err != nil {
+		return PublishResult{}, fmt.Errorf("publish %s@%s: %w", report.Manifest.Name, report.Manifest.Version, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return PublishResult{}, fmt.Errorf("publish %s@%s failed (%s): %s", report.Manifest.Name, report.Manifest.Version, resp.Status, apiErrorMessage(body))
+	}
+
+	var parsed struct {
+		AlreadyPublished bool `json:"alreadyPublished"`
+	}
+	_ = json.Unmarshal(body, &parsed)
+
+	return PublishResult{
+		Name:             report.Manifest.Name,
+		Version:          report.Manifest.Version,
+		Digest:           report.Digest,
+		AlreadyPublished: parsed.AlreadyPublished,
+	}, nil
+}
+
+type packageMetadata struct {
+	Name         string `json:"name"`
+	Version      string `json:"version"`
+	Digest       string `json:"digest"`
+	Description  string `json:"description"`
+	DownloadPath string `json:"downloadPath"`
+}
+
+// Pull fetches a published package by ref ("<name>@<version>", or just
+// "<name>" for the latest published version) from the registry and imports
+// it into destParent, the same way Import does for a local archive.
+//
+// The digest the registry reports for ref is untrusted the same way the
+// archive bytes are: after import, Pull recomputes the digest from the
+// content Import actually kept and fails closed - removing what was
+// imported - if it doesn't match what the registry claimed, or if the
+// registry didn't report a digest at all.
+func Pull(ref string, cfg RegistryConfig, destParent, asName string) (string, error) {
+	meta, err := fetchPackageMetadata(ref, cfg)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := registryClient().Get(cfg.baseURL() + meta.DownloadPath)
+	if err != nil {
+		return "", fmt.Errorf("download %s: %w", ref, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("download %s failed (%s): %s", ref, resp.Status, apiErrorMessage(body))
+	}
+
+	name, err := Import(resp.Body, destParent, asName)
+	if err != nil {
+		return "", err
+	}
+
+	importedDir := filepath.Join(destParent, name)
+	actualDigest, err := ComputeDigest(importedDir)
+	if err != nil {
+		os.RemoveAll(importedDir)
+		return "", fmt.Errorf("verify digest for %s: %w", ref, err)
+	}
+	if meta.Digest == "" {
+		os.RemoveAll(importedDir)
+		return "", fmt.Errorf("registry response for %s did not report a digest; refusing to keep unverified content", ref)
+	}
+	if actualDigest != meta.Digest {
+		os.RemoveAll(importedDir)
+		return "", fmt.Errorf("digest mismatch for %s: registry reported %s, imported content hashes to %s; refusing to keep it", ref, meta.Digest, actualDigest)
+	}
+
+	return name, nil
+}
+
+func fetchPackageMetadata(ref string, cfg RegistryConfig) (packageMetadata, error) {
+	resp, err := registryClient().Get(cfg.baseURL() + "/api/packages/" + url.PathEscape(ref))
+	if err != nil {
+		return packageMetadata{}, fmt.Errorf("resolve %s: %w", ref, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return packageMetadata{}, fmt.Errorf("read metadata for %s: %w", ref, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return packageMetadata{}, fmt.Errorf("resolve %s failed (%s): %s", ref, resp.Status, apiErrorMessage(body))
+	}
+
+	var meta packageMetadata
+	if err := json.Unmarshal(body, &meta); err != nil {
+		return packageMetadata{}, fmt.Errorf("parse metadata for %s: %w", ref, err)
+	}
+	return meta, nil
+}
+
+// apiErrorMessage extracts the registry's {"error": "..."} body into a
+// clean message, falling back to the raw body if it isn't that shape. The
+// registry's own error text already carries retry guidance where it
+// applies (e.g. "safe to retry the same publish" after an interrupted
+// upload) - this just keeps that readable instead of dumping raw JSON.
+func apiErrorMessage(body []byte) string {
+	var parsed struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &parsed); err == nil && parsed.Error != "" {
+		return parsed.Error
+	}
+	return strings.TrimSpace(string(body))
+}

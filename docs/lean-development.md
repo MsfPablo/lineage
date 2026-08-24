@@ -15,14 +15,22 @@ Lineage uses a lean, goal-based development process.
 
 Milestones are goals, not dates.
 
-Current milestone style:
+Current milestones (see the GitHub Milestones page for the authoritative, up-to-date list):
 
+- `Goal: Durable runtime foundations`
 - `Goal: Safe package round trip`
 - `Goal: Receiver setup experience`
-- `Goal: Durable runtime foundations`
 - `Goal: Provider and CI confidence`
+- `Goal: Package materialization`
+- `Goal: Add providers`
+- `Goal: Workflow execution`
+- `Goal: CLI completeness`
 
 A milestone is done when its issues prove the goal works well enough to trust, not when a calendar date arrives.
+
+Stable releases are cut from completed or explicitly bounded goal milestones.
+See [Release And Versioning Policy](release-versioning.md) for how milestone
+completion maps to `master` promotions and SemVer tags.
 
 ## Issue Shape
 
@@ -59,3 +67,6 @@ Every PR should:
 - Stay small enough to review.
 - Include tests or explain why tests do not apply.
 - Explain package safety impact when the change affects export, import, setup, or file materialization.
+- Check [public-docs-sync.md](public-docs-sync.md) when a change affects install,
+  publishing, receiver activation, setup prompts, provider compatibility, or
+  safety wording.

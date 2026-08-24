@@ -6,6 +6,7 @@
 - A receiver can inspect package contents before enabling them.
 - Package enablement can be idempotent and safe for repeated runs.
 - Provider-specific launch behavior can stay behind explicit adapter boundaries.
+- A package can move to another machine (export, then import) and reconstruct exactly, without the receiver having to trust the archive's origin.
 
 ## Current Tests
 
