@@ -136,9 +136,7 @@ func TestApplyCapsStagedFilePermissions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected staged skill at %s: %v", staged, err)
 		}
-		if info.Mode().Perm()&0o022 != 0 {
-			t.Errorf("staged file mode = %v, want no group/other write bit (source was 0o777, umask forced to 0 so the OS can't mask this for us)", info.Mode().Perm())
-		}
+		assertNoLooseWriteBits(t, info.Mode())
 	})
 }
 

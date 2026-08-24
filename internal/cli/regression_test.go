@@ -4,12 +4,35 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/agentic-lineage/lineage/internal/config"
 	"github.com/agentic-lineage/lineage/internal/packages"
 )
+
+// writeFakeProviderScript creates a fake provider executable that records
+// the arguments it's invoked with to markerPath, using whichever command
+// interpreter the current OS actually has (POSIX shell vs. Windows batch),
+// and returns the script's path.
+func writeFakeProviderScript(t *testing.T, dir, markerPath string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "fake-claude.cmd")
+		script := "@echo off\r\necho %* > \"" + markerPath + "\"\r\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	path := filepath.Join(dir, "fake-claude.sh")
+	script := "#!/bin/sh\necho \"$@\" > " + markerPath + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 // TestEnableFromSubdirectoryUsesProjectRoot guards against a regression
 // where `lineage enable` used cwd directly instead of walking up to find an
@@ -142,11 +165,7 @@ func TestRunPassesFlagsAfterDoubleDashToProvider(t *testing.T) {
 
 	// Fake provider binary that records the args it was invoked with.
 	marker := filepath.Join(tmp, "invoked-args.txt")
-	fakeBinary := filepath.Join(tmp, "fake-claude.sh")
-	script := "#!/bin/sh\necho \"$@\" > " + marker + "\n"
-	if err := os.WriteFile(fakeBinary, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	fakeBinary := writeFakeProviderScript(t, tmp, marker)
 
 	cfg := config.DefaultProjectConfig()
 	cfg.Providers = map[string]config.Provider{"claude": {Binary: fakeBinary}}
