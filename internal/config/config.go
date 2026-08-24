@@ -88,6 +88,9 @@ func LoadProjectConfig(path string) (ProjectConfig, error) {
 	if cfg.Providers == nil {
 		cfg.Providers = map[string]Provider{}
 	}
+	if cfg.EnabledPackages == nil {
+		cfg.EnabledPackages = []string{}
+	}
 	return cfg, nil
 }
 
