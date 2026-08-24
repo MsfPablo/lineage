@@ -49,7 +49,9 @@ var deniedExtensions = []string{".pem", ".key", ".pfx", ".p12"}
 // are essentially never present in legitimate package source material.
 var secretContentPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),
-	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),         // AWS access key ID
+	// AWS access key ID: AKIA is a long-lived user key, ASIA a temporary
+	// STS/assumed-role session key.
+	regexp.MustCompile(`\b(AKIA|ASIA)[0-9A-Z]{16}\b`),
 	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}`), // GitHub token prefixes (ghp_, gho_, ghu_, ghs_, ghr_)
 }
 
