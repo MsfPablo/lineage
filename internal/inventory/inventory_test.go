@@ -479,6 +479,36 @@ func TestDiscoverRejectsSymlink(t *testing.T) {
 	}
 }
 
+// TestDiscoverRejectsSymlinkRoot covers the root argument itself, which the
+// in-tree check above never sees: the walk callback returns early on the root
+// entry, before reaching its symlink check, so a symlinked root previously
+// produced a successful empty inventory rather than an error. Silently
+// reporting "nothing here" for a workspace that was never scanned is the
+// failure mode this guards.
+func TestDiscoverRejectsSymlinkRoot(t *testing.T) {
+	real := t.TempDir()
+	mustWrite(t, filepath.Join(real, "CLAUDE.md"), "# Instructions\n")
+
+	link := filepath.Join(t.TempDir(), "link-to-workspace")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+
+	inv, err := Discover(link)
+	if err == nil {
+		t.Fatalf("Discover(symlink root) error = nil with %d entries, want an error", len(inv.Entries))
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("Discover(symlink root) error = %v, want it to name the symlink", err)
+	}
+
+	// The real path still works, so this refuses the indirection, not the
+	// workspace behind it.
+	if _, err := Discover(real); err != nil {
+		t.Errorf("Discover(real root) error = %v, want success", err)
+	}
+}
+
 func entryMap(inv Inventory) map[string]Entry {
 	m := make(map[string]Entry, len(inv.Entries))
 	for _, e := range inv.Entries {

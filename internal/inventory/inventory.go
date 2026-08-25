@@ -161,8 +161,24 @@ var defaultIgnoredDirs = map[string]bool{
 func Discover(root string) (Inventory, error) {
 	inv := Inventory{SchemaVersion: SchemaVersion, Root: root}
 
+	// The walk below skips the root entry before it reaches its symlink
+	// check, so a symlinked root would otherwise walk nothing and return a
+	// successful empty inventory — indistinguishable from a clean scan of an
+	// empty workspace. Check it here instead, refusing rather than resolving
+	// so that Inventory.Root stays the path the caller actually named.
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return Inventory{}, fmt.Errorf("stat discovery root %s: %w", root, err)
+	}
+	if rootInfo.Mode()&fs.ModeSymlink != 0 {
+		return Inventory{}, fmt.Errorf("refusing to use symlink %s as the discovery root", root)
+	}
+	if !rootInfo.IsDir() {
+		return Inventory{}, fmt.Errorf("discovery root %s is not a directory", root)
+	}
+
 	var relPaths []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
