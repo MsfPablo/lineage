@@ -46,7 +46,7 @@ func TestPackagePublishRequiresToken(t *testing.T) {
 	t.Setenv("LINEAGE_REGISTRY_URL", "http://unused.invalid")
 
 	var stdout, stderr bytes.Buffer
-	err := Execute(nil, []string{"package", "publish", pkgDir}, nil, &stdout, &stderr)
+	err := Execute(nil, []string{"package", "publish", pkgDir, "--yes"}, nil, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("publish without a token: error = nil, want error")
 	}
@@ -77,7 +77,7 @@ func TestPackagePublishSucceeds(t *testing.T) {
 	t.Setenv("LINEAGE_REGISTRY_URL", srv.URL)
 
 	var stdout, stderr bytes.Buffer
-	if err := Execute(nil, []string{"package", "publish", pkgDir}, nil, &stdout, &stderr); err != nil {
+	if err := Execute(nil, []string{"package", "publish", pkgDir, "--yes"}, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("publish error = %v stderr=%s", err, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "published publish-me@0.1.0") {
@@ -100,7 +100,7 @@ func TestPackagePublishRefusesPortabilityBlockers(t *testing.T) {
 	t.Setenv("LINEAGE_REGISTRY_URL", "http://unused.invalid")
 
 	var stdout, stderr bytes.Buffer
-	err := Execute(nil, []string{"package", "publish", pkgDir}, nil, &stdout, &stderr)
+	err := Execute(nil, []string{"package", "publish", pkgDir, "--yes"}, nil, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("publish error = nil, want portability blocker error")
 	}
