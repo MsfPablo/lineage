@@ -229,12 +229,7 @@ func Discover(root string) (Inventory, error) {
 	entries := make(map[string]*Entry, len(relPaths))
 	for _, rel := range relPaths {
 		full := filepath.Join(root, filepath.FromSlash(rel))
-		info, statErr := os.Lstat(full)
-		if statErr != nil {
-			return Inventory{}, fmt.Errorf("stat %s: %w", rel, statErr)
-		}
-
-		digest, digestErr := digestFile(full)
+		digest, size, digestErr := digestFile(full)
 		if digestErr != nil {
 			return Inventory{}, fmt.Errorf("digest %s: %w", rel, digestErr)
 		}
@@ -245,7 +240,7 @@ func Discover(root string) (Inventory, error) {
 			Kind:     kind,
 			Reason:   reason,
 			Digest:   digest,
-			Size:     info.Size(),
+			Size:     size,
 			Language: languageFor(rel),
 		}
 	}
@@ -266,11 +261,15 @@ func isIgnoredDir(name string) bool {
 	return defaultIgnoredDirs[name]
 }
 
-func digestFile(path string) (string, error) {
+// digestFile hashes a file's content and reports its size. The size comes from
+// the bytes just read rather than a separate stat: the walk has already
+// established this is a regular file, so the two always agree, and this drops
+// a syscall and an error branch per file.
+func digestFile(path string) (string, int64, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	h := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(h[:]), nil
+	return "sha256:" + hex.EncodeToString(h[:]), int64(len(data)), nil
 }

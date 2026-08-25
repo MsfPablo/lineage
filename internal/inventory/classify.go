@@ -254,7 +254,7 @@ func crossReference(root string, relPaths []string, entries map[string]*Entry) e
 					Column:      at + 1,
 					MatchKind:   kind,
 					MatchedText: matched,
-					Snippet:     truncate(strings.TrimSpace(line), maxSnippetLen),
+					Snippet:     snippetOf(line),
 				}
 				entry.Mentions = append(entry.Mentions, citation)
 				if targetEntry, ok := entries[target.path]; ok {
@@ -403,6 +403,20 @@ func readLines(fullPath string) ([]string, error) {
 		return nil, err
 	}
 	return strings.Split(string(data), "\n"), nil
+}
+
+// snippetOf trims and bounds a source line for use as Citation.Snippet.
+//
+// The clone is load-bearing. readLines splits one string covering the whole
+// file, so trimming and truncating only re-slice: without copying, every
+// snippet keeps its entire source file alive for as long as the Inventory
+// lives, and retention scales with total markdown volume rather than with the
+// number of citations. Measured on ten 500 KB files with one citation each,
+// 520 bytes of snippet text held 5 MB of heap. Citation is documented as
+// cheap to carry into a prompt, and that has to be true of its backing store
+// too, not just the struct.
+func snippetOf(line string) string {
+	return strings.Clone(truncate(strings.TrimSpace(line), maxSnippetLen))
 }
 
 func truncate(s string, max int) string {
