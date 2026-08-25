@@ -15,6 +15,18 @@
 // this inventory (including Mentions) plus raw file content. Treat Mentions
 // and ReferencedBy as a precise but incomplete evidence trail, never as a
 // complete call graph.
+//
+// Because that later stage ingests this as evidence, every citation is a
+// self-describing directed edge (see Citation): it names both ends, where in
+// the source it was found, and how it matched, so the graph is walkable from
+// either side without re-reading the workspace. Entry.AmbiguousBasename
+// records where matching was deliberately withheld, so an empty ReferencedBy
+// is never silently mistaken for "unused".
+//
+// Symlinks are refused rather than followed, including one passed as the
+// discovery root itself: an inventory reports on the tree literally named,
+// and quietly resolving elsewhere would make Inventory.Root a different path
+// from the one the caller asked about.
 package inventory
 
 import (
@@ -38,13 +50,35 @@ const (
 	KindUnknown          ArtifactKind = "unknown"
 )
 
-// Citation points at one line of one instruction file that names another
-// inventoried artifact — the "why is this in scope" evidence, sized to be
-// cheap to carry into an LLM prompt later without re-opening source files.
+// MatchKind records how a citation was found, which is a statement about how
+// strong the evidence is rather than how certain it is. A full relative path
+// is a far more specific claim than a bare filename that merely happens to be
+// unique in this tree, and a consumer weighing evidence should treat the two
+// differently.
+type MatchKind string
+
+const (
+	MatchPath     MatchKind = "path"
+	MatchBasename MatchKind = "basename"
+)
+
+// Citation is one directed edge in the evidence graph: markdown file FromPath
+// names inventoried artifact ToPath, on this line, by this literal text. It
+// is the "why is this in scope" evidence, sized to be cheap to carry into an
+// LLM prompt later without re-opening source files.
+//
+// The same Citation value is recorded twice — on the citer's Mentions and on
+// the target's ReferencedBy — so the graph can be walked from either end.
+// ToPath is therefore redundant on the ReferencedBy side; that redundancy is
+// what makes a single edge self-describing wherever it is read.
 type Citation struct {
-	FromPath string `json:"from_path"` // the instruction file doing the citing
-	Line     int    `json:"line"`      // 1-indexed line number within FromPath
-	Snippet  string `json:"snippet"`   // that line's text, truncated
+	FromPath    string    `json:"from_path"`    // the markdown file doing the citing
+	ToPath      string    `json:"to_path"`      // the inventoried artifact being named
+	Line        int       `json:"line"`         // 1-indexed line number within FromPath
+	Column      int       `json:"column"`       // 1-indexed byte offset of the match within that line
+	MatchKind   MatchKind `json:"match_kind"`   // how it matched, i.e. how strong the evidence is
+	MatchedText string    `json:"matched_text"` // the literal token as written in the source
+	Snippet     string    `json:"snippet"`      // that line's text, truncated
 }
 
 // maxSnippetLen bounds Citation.Snippet so a citation is always small and
@@ -53,8 +87,8 @@ const maxSnippetLen = 200
 
 // Entry describes one file discovered under a workspace root.
 type Entry struct {
-	Path     string       `json:"path"` // relative to Inventory.Root, forward-slashed
-	Kind     ArtifactKind `json:"kind"`
+	Path string       `json:"path"` // relative to Inventory.Root, forward-slashed
+	Kind ArtifactKind `json:"kind"`
 	// Reason is the base classification reason (the heuristic rule that
 	// matched). It is independent of citations and is never overwritten by
 	// the cross-reference pass.
@@ -63,24 +97,43 @@ type Entry struct {
 	Size     int64  `json:"size"`
 	Language string `json:"language,omitempty"` // by extension, best-effort
 
+	// AmbiguousBasename is true when this file's basename is shared with at
+	// least one other file in the tree, so bare-name citation matching was
+	// suppressed for it (see buildCandidates) and only a full-path mention
+	// could cite it.
+	//
+	// Without this flag an empty ReferencedBy is ambiguous: a consumer cannot
+	// tell a genuinely unreferenced file from one whose weak matches were
+	// deliberately withheld, and must not conclude "unused" from the second
+	// case. Reported honestly rather than papered over.
+	AmbiguousBasename bool `json:"ambiguous_basename,omitempty"`
+
 	// Mentions is populated for every markdown (.md) entry, regardless of
-	// Kind: every other inventoried path this file's text literally names,
-	// one Citation per occurrence. Citation eligibility depends only on
-	// being prose, not on whether classify() could confidently label the
-	// citing file itself — an unclassified markdown file can still cite.
+	// Kind: the outgoing edges from this file, one Citation per (line,
+	// target) pair naming another inventoried artifact. Read ToPath to learn
+	// what was named. Citation eligibility depends only on being prose, not
+	// on whether classify() could confidently label the citing file itself —
+	// an unclassified markdown file can still cite.
 	Mentions []Citation `json:"mentions,omitempty"`
 
-	// ReferencedBy is populated on the target side, any kind: every
-	// instruction-file citation that names this entry. Empty means
-	// literally unreferenced by any instruction file's prose — a real,
-	// honestly-reported fact, not an omission.
+	// ReferencedBy is populated on the target side, any kind: the incoming
+	// edges naming this entry. Empty means literally unreferenced by any
+	// markdown file's prose — a real, honestly-reported fact, not an
+	// omission — but read AmbiguousBasename before drawing a conclusion
+	// from it.
 	ReferencedBy []Citation `json:"referenced_by,omitempty"`
 }
 
+// SchemaVersion is the version of the serialized Inventory shape. Discover
+// stamps it on every result so a later consumer reading a stored inventory
+// can tell which field set it was written with.
+const SchemaVersion = 1
+
 // Inventory is the deterministic result of Discover.
 type Inventory struct {
-	Root    string  `json:"root"`
-	Entries []Entry `json:"entries"` // sorted by Path
+	SchemaVersion int     `json:"schema_version"`
+	Root          string  `json:"root"`
+	Entries       []Entry `json:"entries"` // sorted by Path
 }
 
 // defaultIgnoredDirs are directory names skipped anywhere in the tree by
@@ -106,7 +159,7 @@ var defaultIgnoredDirs = map[string]bool{
 // Discover walks root read-only and returns a deterministic inventory. It
 // never creates, edits, deletes, or executes anything under root.
 func Discover(root string) (Inventory, error) {
-	inv := Inventory{Root: root}
+	inv := Inventory{SchemaVersion: SchemaVersion, Root: root}
 
 	var relPaths []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {

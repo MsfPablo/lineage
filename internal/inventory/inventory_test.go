@@ -134,7 +134,7 @@ func TestDiscoverCitationSingleReference(t *testing.T) {
 	if len(deploy.ReferencedBy) != 1 {
 		t.Fatalf("scripts/deploy.sh ReferencedBy = %+v, want exactly 1 citation", deploy.ReferencedBy)
 	}
-	want := Citation{FromPath: "workflows/deploy/WORKFLOW.md", Line: 4, Snippet: "2. Run scripts/deploy.sh to ship."}
+	want := pathCite(t, "workflows/deploy/WORKFLOW.md", "scripts/deploy.sh", 4, "2. Run scripts/deploy.sh to ship.")
 	if deploy.ReferencedBy[0] != want {
 		t.Errorf("scripts/deploy.sh ReferencedBy[0] = %+v, want %+v", deploy.ReferencedBy[0], want)
 	}
@@ -237,6 +237,112 @@ func TestDiscoverAmbiguousBasenameOnlyMatchesFullPath(t *testing.T) {
 // directory-based instruction rule only recognized bare top-level
 // skills/workflows/, not the .claude/-prefixed convention real Claude Code
 // repos actually use, and had no notion of an "agents" directory at all.
+// TestDiscoverMentionsIdentifyTargets is the regression for the original
+// API-contract gap: an outgoing Mentions entry recorded only FromPath — the
+// citing file itself — so a consumer could not tell what had been named, and
+// two targets on one line produced byte-identical citations.
+func TestDiscoverMentionsIdentifyTargets(t *testing.T) {
+	root := t.TempDir()
+	const line = "Run scripts/deploy.sh then scripts/verify.sh to ship."
+	mustWrite(t, filepath.Join(root, "CLAUDE.md"), "# Release\n\n"+line+"\n")
+	mustWrite(t, filepath.Join(root, "scripts", "deploy.sh"), "#!/bin/sh\n")
+	mustWrite(t, filepath.Join(root, "scripts", "verify.sh"), "#!/bin/sh\n")
+
+	inv, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	byPath := entryMap(inv)
+
+	got := byPath["CLAUDE.md"].Mentions
+	want := []Citation{
+		pathCite(t, "CLAUDE.md", "scripts/deploy.sh", 3, line),
+		pathCite(t, "CLAUDE.md", "scripts/verify.sh", 3, line),
+	}
+	// Both edges share a line and a snippet; ToPath and Column are what make
+	// them distinguishable, and the order is ToPath-sorted.
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CLAUDE.md Mentions = %+v, want %+v", got, want)
+	}
+}
+
+// TestDiscoverCitationReportsMatchStrength asserts a bare-name citation is
+// labelled as the weaker evidence it is, so a consumer can weigh a filename
+// that merely happens to be unique differently from an explicit path.
+func TestDiscoverCitationReportsMatchStrength(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "skills", "foo", "SKILL.md"),
+		"# Foo\n\nInvoke the helper by running `run.sh` after setup.\n")
+	mustWrite(t, filepath.Join(root, "skills", "foo", "run.sh"), "#!/bin/sh\n")
+
+	inv, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	byPath := entryMap(inv)
+
+	got := byPath["skills/foo/run.sh"].ReferencedBy
+	if len(got) != 1 {
+		t.Fatalf("skills/foo/run.sh ReferencedBy = %+v, want exactly 1", got)
+	}
+	if got[0].MatchKind != MatchBasename {
+		t.Errorf("MatchKind = %q, want %q (named as a bare filename, not a path)", got[0].MatchKind, MatchBasename)
+	}
+	if got[0].MatchedText != "run.sh" {
+		t.Errorf("MatchedText = %q, want %q", got[0].MatchedText, "run.sh")
+	}
+	if got[0].ToPath != "skills/foo/run.sh" {
+		t.Errorf("ToPath = %q, want %q", got[0].ToPath, "skills/foo/run.sh")
+	}
+}
+
+// TestDiscoverFlagsAmbiguousBasename covers the distinction a consumer needs
+// in order to read an empty ReferencedBy correctly: a file whose bare-name
+// matching was suppressed is not the same as a genuinely unreferenced one,
+// and concluding "unused" from the former would be wrong.
+func TestDiscoverFlagsAmbiguousBasename(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "a", "report.json"), "{}\n")
+	mustWrite(t, filepath.Join(root, "b", "report.json"), "{}\n")
+	mustWrite(t, filepath.Join(root, "scripts", "orphan.sh"), "#!/bin/sh\n")
+	mustWrite(t, filepath.Join(root, "CLAUDE.md"), "# Notes\n\nCheck `report.json` when debugging.\n")
+
+	inv, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	byPath := entryMap(inv)
+
+	for _, p := range []string{"a/report.json", "b/report.json"} {
+		e := byPath[p]
+		if !e.AmbiguousBasename {
+			t.Errorf("%s AmbiguousBasename = false, want true (basename shared)", p)
+		}
+		if len(e.ReferencedBy) != 0 {
+			t.Errorf("%s ReferencedBy = %+v, want empty (bare name is ambiguous)", p, e.ReferencedBy)
+		}
+	}
+	// The orphan is equally unreferenced, but for the other reason — and is
+	// distinguishable precisely because the flag is not set.
+	orphan := byPath["scripts/orphan.sh"]
+	if orphan.AmbiguousBasename {
+		t.Error("scripts/orphan.sh AmbiguousBasename = true, want false (basename is unique)")
+	}
+	if len(orphan.ReferencedBy) != 0 {
+		t.Errorf("scripts/orphan.sh ReferencedBy = %+v, want empty", orphan.ReferencedBy)
+	}
+}
+
+func TestDiscoverStampsSchemaVersion(t *testing.T) {
+	inv, err := Discover(buildMixedWorkspace(t))
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	if inv.SchemaVersion != SchemaVersion {
+		t.Errorf("SchemaVersion = %d, want %d", inv.SchemaVersion, SchemaVersion)
+	}
+}
+
 // TestDiscoverCitationRequiresTokenBoundary pins the substring false
 // positives that plain strings.Contains matching produced: a line naming a
 // backup or a similarly-prefixed directory must not cite the shorter path it
@@ -379,6 +485,26 @@ func entryMap(inv Inventory) map[string]Entry {
 		m[e.Path] = e
 	}
 	return m
+}
+
+// pathCite builds the expected full-path citation for a line, deriving
+// Column and Snippet from the source text so a seven-field expectation stays
+// readable at the call site.
+func pathCite(t *testing.T, from, to string, line int, text string) Citation {
+	t.Helper()
+	col := strings.Index(text, to)
+	if col < 0 {
+		t.Fatalf("pathCite: %q does not appear in %q", to, text)
+	}
+	return Citation{
+		FromPath:    from,
+		ToPath:      to,
+		Line:        line,
+		Column:      col + 1,
+		MatchKind:   MatchPath,
+		MatchedText: to,
+		Snippet:     strings.TrimSpace(text),
+	}
 }
 
 func containsCitation(cs []Citation, want Citation) bool {

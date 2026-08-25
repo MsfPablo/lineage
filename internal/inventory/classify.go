@@ -190,8 +190,11 @@ func languageFor(rel string) string {
 
 // crossReference implements pass 2: every markdown file's content is
 // scanned line-by-line for literal occurrences of any other entry's
-// relative path or bare filename. Each match becomes one Citation, recorded
-// on both the citer's Mentions and the target's ReferencedBy.
+// relative path or bare filename. Each (line, target) pair becomes one
+// Citation — a directed FromPath -> ToPath edge — recorded on both the
+// citer's Mentions and the target's ReferencedBy, so the graph reads from
+// either end. A line naming the same target twice yields one citation,
+// anchored at the first match.
 //
 // Eligibility to cite is based on being markdown (prose), not on Kind: a
 // real messy workspace has plenty of instruction-shaped .md files that
@@ -206,6 +209,16 @@ func languageFor(rel string) string {
 // intentional.
 func crossReference(root string, relPaths []string, entries map[string]*Entry) error {
 	candidates := buildCandidates(relPaths)
+
+	// A blanked base is exactly buildCandidates' record that this file's
+	// basename was shared, so surface that on the entry rather than counting
+	// basenames a second time. Consumers need it to read an empty
+	// ReferencedBy correctly.
+	for _, c := range candidates {
+		if c.base == "" {
+			entries[c.path].AmbiguousBasename = true
+		}
+	}
 
 	for _, rel := range relPaths {
 		entry := entries[rel]
@@ -224,20 +237,26 @@ func crossReference(root string, relPaths []string, entries map[string]*Entry) e
 				if target.path == rel {
 					continue // a file never cites itself
 				}
+				// A full-path mention is the stronger claim, so it is tried
+				// first and wins when both forms match the same line.
 				// findPathToken returns -1 for an empty needle, so an
 				// ambiguous basename (blanked by buildCandidates) simply
 				// never matches.
-				at := findPathToken(line, target.path)
+				at, kind, matched := findPathToken(line, target.path), MatchPath, target.path
 				if at < 0 {
-					at = findPathToken(line, target.base)
+					at, kind, matched = findPathToken(line, target.base), MatchBasename, target.base
 				}
 				if at < 0 {
 					continue
 				}
 				citation := Citation{
-					FromPath: rel,
-					Line:     lineNo + 1,
-					Snippet:  truncate(strings.TrimSpace(line), maxSnippetLen),
+					FromPath:    rel,
+					ToPath:      target.path,
+					Line:        lineNo + 1,
+					Column:      at + 1,
+					MatchKind:   kind,
+					MatchedText: matched,
+					Snippet:     truncate(strings.TrimSpace(line), maxSnippetLen),
 				}
 				entry.Mentions = append(entry.Mentions, citation)
 				if targetEntry, ok := entries[target.path]; ok {
@@ -321,8 +340,11 @@ type candidate struct {
 }
 
 // buildCandidates returns one candidate per relative path, in the same
-// (sorted) order Discover already computed relPaths in, so citation output
-// order is deterministic run to run. Bare-filename matching is only offered
+// (sorted) order Discover already computed relPaths in. crossReference walks
+// candidates in that order, so the citations recorded for a single line come
+// out sorted by ToPath — a deterministic ordering the tests pin, and one any
+// future indexed rewrite of the matching loop must reproduce explicitly
+// rather than inherit. Bare-filename matching is only offered
 // for basenames that are unique across the whole tree: on a real workspace,
 // generic names like "config.json" or dated output like
 // "workspace/2024-01-01/report.json" can share a basename with dozens of
