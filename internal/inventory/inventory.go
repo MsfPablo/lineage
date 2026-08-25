@@ -16,13 +16,6 @@
 // and ReferencedBy as a precise but incomplete evidence trail, never as a
 // complete call graph.
 //
-// Because that later stage ingests this as evidence, every citation is a
-// self-describing directed edge (see Citation): it names both ends, where in
-// the source it was found, and how it matched, so the graph is walkable from
-// either side without re-reading the workspace. Entry.AmbiguousBasename
-// records where matching was deliberately withheld, so an empty ReferencedBy
-// is never silently mistaken for "unused".
-//
 // Symlinks are refused rather than followed, including one passed as the
 // discovery root itself: an inventory reports on the tree literally named,
 // and quietly resolving elsewhere would make Inventory.Root a different path
@@ -124,16 +117,21 @@ type Entry struct {
 	ReferencedBy []Citation `json:"referenced_by,omitempty"`
 }
 
-// SchemaVersion is the version of the serialized Inventory shape. Discover
-// stamps it on every result so a later consumer reading a stored inventory
-// can tell which field set it was written with.
-const SchemaVersion = 1
+// CurrentSchema is the version of the serialized Inventory shape, named and
+// tagged to match packages.Manifest.Schema and snapshot manifests per ADR
+// 0005. Discover stamps it on every result so a later consumer reading a
+// stored inventory can tell which field set it was written with.
+//
+// Unlike those two, nothing reads a stored inventory back yet, so there is no
+// parse-time schema check here and no "0 means 1" defaulting. Whoever adds
+// the first reader should add both, following packages.LoadManifest.
+const CurrentSchema = 1
 
 // Inventory is the deterministic result of Discover.
 type Inventory struct {
-	SchemaVersion int     `json:"schema_version"`
-	Root          string  `json:"root"`
-	Entries       []Entry `json:"entries"` // sorted by Path
+	Schema  int     `json:"schema"`
+	Root    string  `json:"root"`
+	Entries []Entry `json:"entries"` // sorted by Path
 }
 
 // defaultIgnoredDirs are directory names skipped anywhere in the tree by
@@ -159,7 +157,7 @@ var defaultIgnoredDirs = map[string]bool{
 // Discover walks root read-only and returns a deterministic inventory. It
 // never creates, edits, deletes, or executes anything under root.
 func Discover(root string) (Inventory, error) {
-	inv := Inventory{SchemaVersion: SchemaVersion, Root: root}
+	inv := Inventory{Schema: CurrentSchema, Root: root}
 
 	// The walk below skips the root entry before it reaches its symlink
 	// check, so a symlinked root would otherwise walk nothing and return a

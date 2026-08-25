@@ -229,14 +229,6 @@ func TestDiscoverAmbiguousBasenameOnlyMatchesFullPath(t *testing.T) {
 	}
 }
 
-// TestDiscoverRecognizesProviderPrefixedAgentFiles reproduces a real gap
-// found by running Discover against an actual public Claude Code project
-// (ChrisWiles/claude-code-showcase): .claude/agents/code-reviewer.md is
-// genuine instruction content (YAML frontmatter + prose, structurally
-// identical to a SKILL.md) but was classified unknown, because the
-// directory-based instruction rule only recognized bare top-level
-// skills/workflows/, not the .claude/-prefixed convention real Claude Code
-// repos actually use, and had no notion of an "agents" directory at all.
 // TestDiscoverMentionsIdentifyTargets is the regression for the original
 // API-contract gap: an outgoing Mentions entry recorded only FromPath — the
 // citing file itself — so a consumer could not tell what had been named, and
@@ -333,13 +325,13 @@ func TestDiscoverFlagsAmbiguousBasename(t *testing.T) {
 	}
 }
 
-func TestDiscoverStampsSchemaVersion(t *testing.T) {
+func TestDiscoverStampsSchema(t *testing.T) {
 	inv, err := Discover(buildMixedWorkspace(t))
 	if err != nil {
 		t.Fatalf("Discover() error = %v", err)
 	}
-	if inv.SchemaVersion != SchemaVersion {
-		t.Errorf("SchemaVersion = %d, want %d", inv.SchemaVersion, SchemaVersion)
+	if inv.Schema != CurrentSchema {
+		t.Errorf("Schema = %d, want %d", inv.Schema, CurrentSchema)
 	}
 }
 
@@ -403,6 +395,14 @@ func TestDiscoverCitationSurvivesAdjacentPunctuation(t *testing.T) {
 	}
 }
 
+// TestDiscoverRecognizesProviderPrefixedAgentFiles reproduces a real gap
+// found by running Discover against an actual public Claude Code project
+// (ChrisWiles/claude-code-showcase): .claude/agents/code-reviewer.md is
+// genuine instruction content (YAML frontmatter + prose, structurally
+// identical to a SKILL.md) but was classified unknown, because the
+// directory-based instruction rule only recognized bare top-level
+// skills/workflows/, not the .claude/-prefixed convention real Claude Code
+// repos actually use, and had no notion of an "agents" directory at all.
 func TestDiscoverRecognizesProviderPrefixedAgentFiles(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, ".claude", "agents", "code-reviewer.md"),

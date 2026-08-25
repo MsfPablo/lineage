@@ -207,13 +207,19 @@ func languageFor(rel string) string {
 // This is deliberately plain string matching, not any form of semantic
 // analysis — see the package doc comment for why that boundary is
 // intentional.
+//
+// Cost is O(markdown lines x candidates), and each markdown file is read
+// fully into memory. That is an accepted v1 tradeoff: the expected input is a
+// single agent workspace, tens to low hundreds of files. Replacing the scan
+// with a token index is the obvious lever if that stops holding — note that
+// the citation order for a line falls out of the sorted candidate walk (see
+// buildCandidates), so an index-based rewrite has to sort each line's matches
+// explicitly to stay deterministic.
 func crossReference(root string, relPaths []string, entries map[string]*Entry) error {
 	candidates := buildCandidates(relPaths)
 
-	// A blanked base is exactly buildCandidates' record that this file's
-	// basename was shared, so surface that on the entry rather than counting
-	// basenames a second time. Consumers need it to read an empty
-	// ReferencedBy correctly.
+	// A blanked base is buildCandidates' record that the basename was shared;
+	// surface it rather than counting basenames a second time.
 	for _, c := range candidates {
 		if c.base == "" {
 			entries[c.path].AmbiguousBasename = true
@@ -237,15 +243,7 @@ func crossReference(root string, relPaths []string, entries map[string]*Entry) e
 				if target.path == rel {
 					continue // a file never cites itself
 				}
-				// A full-path mention is the stronger claim, so it is tried
-				// first and wins when both forms match the same line.
-				// findPathToken returns -1 for an empty needle, so an
-				// ambiguous basename (blanked by buildCandidates) simply
-				// never matches.
-				at, kind, matched := findPathToken(line, target.path), MatchPath, target.path
-				if at < 0 {
-					at, kind, matched = findPathToken(line, target.base), MatchBasename, target.base
-				}
+				at, kind, matched := matchTarget(line, target)
 				if at < 0 {
 					continue
 				}
@@ -277,14 +275,9 @@ func crossReference(root string, relPaths []string, entries map[string]*Entry) e
 // through a relative prefix ("see ../../references/notes.csv"), and treating
 // the separator as a continuation byte would discard those real citations.
 // The cost is that a path mention which merely ends with an inventoried path
-// still matches; that is far rarer than the relative-prefix case, and such a
-// citation is reported as the weaker MatchBasename/MatchPath evidence it is.
+// still matches; that is far rarer than the relative-prefix case.
 func isPathTokenByte(b byte) bool {
-	switch {
-	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
-		return true
-	}
-	return b == '_' || b == '-'
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_' || b == '-'
 }
 
 // findPathToken returns the byte offset of the first occurrence of needle in
@@ -294,7 +287,7 @@ func findPathToken(line, needle string) int {
 	if needle == "" {
 		return -1
 	}
-	for start := 0; start+len(needle) <= len(line); {
+	for start := 0; ; {
 		i := strings.Index(line[start:], needle)
 		if i < 0 {
 			return -1
@@ -305,7 +298,6 @@ func findPathToken(line, needle string) int {
 		}
 		start = i + 1
 	}
-	return -1
 }
 
 func boundedLeft(line string, i int) bool {
@@ -334,17 +326,28 @@ func boundedRight(line string, end int) bool {
 	return end+1 >= len(line) || !isPathTokenByte(line[end+1])
 }
 
+// matchTarget reports where and how line names target. A full-path mention is
+// the stronger claim, so it is tried first and wins when both forms match the
+// same line. findPathToken returns -1 for an empty needle, so an ambiguous
+// basename (blanked by buildCandidates) simply never matches.
+func matchTarget(line string, target candidate) (int, MatchKind, string) {
+	if at := findPathToken(line, target.path); at >= 0 {
+		return at, MatchPath, target.path
+	}
+	if at := findPathToken(line, target.base); at >= 0 {
+		return at, MatchBasename, target.base
+	}
+	return -1, "", ""
+}
+
 type candidate struct {
 	path string // full relative path, forward-slashed
 	base string // bare filename
 }
 
 // buildCandidates returns one candidate per relative path, in the same
-// (sorted) order Discover already computed relPaths in. crossReference walks
-// candidates in that order, so the citations recorded for a single line come
-// out sorted by ToPath — a deterministic ordering the tests pin, and one any
-// future indexed rewrite of the matching loop must reproduce explicitly
-// rather than inherit. Bare-filename matching is only offered
+// (sorted) order Discover already computed relPaths in; crossReference walks
+// them in that order, so a line's citations come out sorted by ToPath. Bare-filename matching is only offered
 // for basenames that are unique across the whole tree: on a real workspace,
 // generic names like "config.json" or dated output like
 // "workspace/2024-01-01/report.json" can share a basename with dozens of
