@@ -218,10 +218,10 @@ func languageFor(rel string) string {
 func crossReference(root string, relPaths []string, entries map[string]*Entry) error {
 	candidates := buildCandidates(relPaths)
 
-	// A blanked base is buildCandidates' record that the basename was shared;
-	// surface it rather than counting basenames a second time.
+	// buildCandidates already worked out which basenames collide; surface that
+	// on the entry rather than counting basenames a second time.
 	for _, c := range candidates {
-		if c.base == "" {
+		if c.baseShared {
 			entries[c.path].AmbiguousBasename = true
 		}
 	}
@@ -326,23 +326,52 @@ func boundedRight(line string, end int) bool {
 	return end+1 >= len(line) || !isPathTokenByte(line[end+1])
 }
 
-// matchTarget reports where and how line names target. A full-path mention is
-// the stronger claim, so it is tried first and wins when both forms match the
-// same line. findPathToken returns -1 for an empty needle, so an ambiguous
-// basename (blanked by buildCandidates) simply never matches.
+// matchTarget reports where and how line names target, along with the
+// reference exactly as the prose wrote it. A full-path mention is the stronger
+// claim, so it is tried first and wins when both forms match the same line.
 func matchTarget(line string, target candidate) (int, MatchKind, string) {
 	if at := findPathToken(line, target.path); at >= 0 {
-		return at, MatchPath, target.path
+		start, text := writtenRef(line, at, len(target.path))
+		return start, MatchPath, text
+	}
+	if target.baseShared {
+		return -1, "", ""
 	}
 	if at := findPathToken(line, target.base); at >= 0 {
-		return at, MatchBasename, target.base
+		start, text := writtenRef(line, at, len(target.base))
+		return start, MatchBasename, text
 	}
 	return -1, "", ""
 }
 
+// writtenRef widens a match to the whole path reference around it, so a
+// citation can report what the prose actually said rather than the needle that
+// found it. A line naming "../../references/data.csv" cites
+// references/data.csv, but the relative prefix is part of the reference and a
+// consumer resolving it needs to see it. Returns the offset and text of the
+// widened span.
+//
+// boundedLeft already guarantees the byte before a match is neither a
+// path-token byte nor ".", so this only ever widens across a "/" separator
+// and whatever path bytes precede it.
+func writtenRef(line string, at, length int) (int, string) {
+	start := at
+	for start > 0 {
+		if b := line[start-1]; !isPathTokenByte(b) && b != '/' && b != '.' {
+			break
+		}
+		start--
+	}
+	return start, line[start : at+length]
+}
+
 type candidate struct {
 	path string // full relative path, forward-slashed
-	base string // bare filename
+	base string // bare filename, always populated
+	// baseShared marks a basename that collides with another file's, so
+	// bare-name matching is suppressed for it and only a full-path mention
+	// can cite it.
+	baseShared bool
 }
 
 // buildCandidates returns one candidate per relative path, in the same
@@ -363,10 +392,7 @@ func buildCandidates(relPaths []string) []candidate {
 	out := make([]candidate, 0, len(relPaths))
 	for _, rel := range relPaths {
 		base := path.Base(rel)
-		if baseCounts[base] > 1 {
-			base = ""
-		}
-		out = append(out, candidate{path: rel, base: base})
+		out = append(out, candidate{path: rel, base: base, baseShared: baseCounts[base] > 1})
 	}
 	return out
 }

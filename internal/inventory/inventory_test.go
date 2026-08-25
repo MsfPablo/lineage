@@ -390,8 +390,19 @@ func TestDiscoverCitationSurvivesAdjacentPunctuation(t *testing.T) {
 	if got := byPath["scripts/build.sh"].ReferencedBy; len(got) != 1 {
 		t.Errorf("scripts/build.sh ReferencedBy = %+v, want 1 (backtick-wrapped bare name)", got)
 	}
-	if got := byPath["references/data.csv"].ReferencedBy; len(got) != 1 {
-		t.Errorf("references/data.csv ReferencedBy = %+v, want 1 (relative prefix + trailing period)", got)
+	got := byPath["references/data.csv"].ReferencedBy
+	if len(got) != 1 {
+		t.Fatalf("references/data.csv ReferencedBy = %+v, want 1 (relative prefix + trailing period)", got)
+	}
+	// MatchedText reports the reference as the prose wrote it, relative prefix
+	// included — that prefix is what a consumer needs to resolve it, and it is
+	// the reason MatchedText is not simply ToPath.
+	if want := "../../references/data.csv"; got[0].MatchedText != want {
+		t.Errorf("MatchedText = %q, want %q", got[0].MatchedText, want)
+	}
+	line := "Run `build.sh`, then read ../../references/data.csv."
+	if want := strings.Index(line, "../../") + 1; got[0].Column != want {
+		t.Errorf("Column = %d, want %d (start of the written reference)", got[0].Column, want)
 	}
 }
 

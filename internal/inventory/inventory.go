@@ -65,13 +65,23 @@ const (
 // ToPath is therefore redundant on the ReferencedBy side; that redundancy is
 // what makes a single edge self-describing wherever it is read.
 type Citation struct {
-	FromPath    string    `json:"from_path"`    // the markdown file doing the citing
-	ToPath      string    `json:"to_path"`      // the inventoried artifact being named
-	Line        int       `json:"line"`         // 1-indexed line number within FromPath
-	Column      int       `json:"column"`       // 1-indexed byte offset of the match within that line
-	MatchKind   MatchKind `json:"match_kind"`   // how it matched, i.e. how strong the evidence is
-	MatchedText string    `json:"matched_text"` // the literal token as written in the source
-	Snippet     string    `json:"snippet"`      // that line's text, truncated
+	FromPath  string    `json:"from_path"`  // the markdown file doing the citing
+	ToPath    string    `json:"to_path"`    // the inventoried artifact being named
+	Line      int       `json:"line"`       // 1-indexed line number within FromPath
+	MatchKind MatchKind `json:"match_kind"` // how it matched, i.e. how strong the evidence is
+
+	// Column is a 1-indexed byte offset into the raw source line, where
+	// MatchedText begins. Note that Snippet is trimmed and truncated, so
+	// Column does not index into it.
+	Column int `json:"column"`
+
+	// MatchedText is the reference as the prose actually wrote it, which is
+	// not always ToPath: a line naming "../../references/data.csv" cites
+	// references/data.csv but wrote the relative prefix, and a consumer
+	// resolving the reference needs what was written.
+	MatchedText string `json:"matched_text"`
+
+	Snippet string `json:"snippet"` // the line's text, trimmed and truncated
 }
 
 // maxSnippetLen bounds Citation.Snippet so a citation is always small and
@@ -159,11 +169,16 @@ var defaultIgnoredDirs = map[string]bool{
 func Discover(root string) (Inventory, error) {
 	inv := Inventory{Schema: CurrentSchema, Root: root}
 
-	// The walk below skips the root entry before it reaches its symlink
-	// check, so a symlinked root would otherwise walk nothing and return a
+	// The discovery root is an argument to validate, not a tree entry: the
+	// walk below deliberately skips it (a workspace directory that happens to
+	// be named "vendor" must not match defaultIgnoredDirs and scan nothing),
+	// so preconditions on it belong here rather than in the callback. Without
+	// this, a symlinked or non-directory root walked nothing and returned a
 	// successful empty inventory — indistinguishable from a clean scan of an
-	// empty workspace. Check it here instead, refusing rather than resolving
-	// so that Inventory.Root stays the path the caller actually named.
+	// empty workspace.
+	//
+	// Symlinks are refused rather than resolved so Inventory.Root stays the
+	// path the caller actually named.
 	rootInfo, err := os.Lstat(root)
 	if err != nil {
 		return Inventory{}, fmt.Errorf("stat discovery root %s: %w", root, err)
