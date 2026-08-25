@@ -237,6 +237,66 @@ func TestDiscoverAmbiguousBasenameOnlyMatchesFullPath(t *testing.T) {
 // directory-based instruction rule only recognized bare top-level
 // skills/workflows/, not the .claude/-prefixed convention real Claude Code
 // repos actually use, and had no notion of an "agents" directory at all.
+// TestDiscoverCitationRequiresTokenBoundary pins the substring false
+// positives that plain strings.Contains matching produced: a line naming a
+// backup or a similarly-prefixed directory must not cite the shorter path it
+// happens to contain. Citations are evidence, so a match that is really part
+// of a longer name is worse than no match at all.
+func TestDiscoverCitationRequiresTokenBoundary(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "scripts", "deploy.sh"), "#!/bin/sh\necho deploy\n")
+	mustWrite(t, filepath.Join(root, "scripts", "deploy.sh.bak"), "#!/bin/sh\necho old\n")
+	mustWrite(t, filepath.Join(root, "myscripts", "deploy.sh"), "#!/bin/sh\necho other\n")
+	mustWrite(t, filepath.Join(root, "CLAUDE.md"),
+		"# Notes\n\nThe old scripts/deploy.sh.bak is dead, ignore it.\n"+
+			"Nothing here runs myscripts/deploy.sh either.\n")
+
+	inv, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	byPath := entryMap(inv)
+
+	// Suffix case: "scripts/deploy.sh.bak" contains "scripts/deploy.sh".
+	if got := byPath["scripts/deploy.sh"].ReferencedBy; len(got) != 0 {
+		t.Errorf("scripts/deploy.sh ReferencedBy = %+v, want empty (only the .bak file was named)", got)
+	}
+	// Prefix case: "myscripts/deploy.sh" contains "scripts/deploy.sh".
+	if got := byPath["scripts/deploy.sh.bak"].ReferencedBy; len(got) != 1 {
+		t.Errorf("scripts/deploy.sh.bak ReferencedBy = %+v, want exactly 1 (it is the file actually named)", got)
+	}
+	if got := byPath["myscripts/deploy.sh"].ReferencedBy; len(got) != 1 {
+		t.Errorf("myscripts/deploy.sh ReferencedBy = %+v, want exactly 1", got)
+	}
+}
+
+// TestDiscoverCitationSurvivesAdjacentPunctuation guards the other side of
+// the boundary rule: tightening the matcher must not start dropping real
+// citations that sit next to ordinary prose punctuation, or next to a
+// relative path prefix.
+func TestDiscoverCitationSurvivesAdjacentPunctuation(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "scripts", "build.sh"), "#!/bin/sh\n")
+	mustWrite(t, filepath.Join(root, "references", "data.csv"), "a,b\n")
+	mustWrite(t, filepath.Join(root, "skills", "foo", "SKILL.md"),
+		"Run `build.sh`, then read ../../references/data.csv.\n")
+
+	inv, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	byPath := entryMap(inv)
+
+	// Backtick-wrapped bare name, and a path reached through "../../" whose
+	// sentence-ending period must not read as a filename extension.
+	if got := byPath["scripts/build.sh"].ReferencedBy; len(got) != 1 {
+		t.Errorf("scripts/build.sh ReferencedBy = %+v, want 1 (backtick-wrapped bare name)", got)
+	}
+	if got := byPath["references/data.csv"].ReferencedBy; len(got) != 1 {
+		t.Errorf("references/data.csv ReferencedBy = %+v, want 1 (relative prefix + trailing period)", got)
+	}
+}
+
 func TestDiscoverRecognizesProviderPrefixedAgentFiles(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, ".claude", "agents", "code-reviewer.md"),

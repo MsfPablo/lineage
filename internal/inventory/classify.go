@@ -224,9 +224,14 @@ func crossReference(root string, relPaths []string, entries map[string]*Entry) e
 				if target.path == rel {
 					continue // a file never cites itself
 				}
-				matchesPath := strings.Contains(line, target.path)
-				matchesBase := target.base != "" && strings.Contains(line, target.base)
-				if !matchesPath && !matchesBase {
+				// findPathToken returns -1 for an empty needle, so an
+				// ambiguous basename (blanked by buildCandidates) simply
+				// never matches.
+				at := findPathToken(line, target.path)
+				if at < 0 {
+					at = findPathToken(line, target.base)
+				}
+				if at < 0 {
 					continue
 				}
 				citation := Citation{
@@ -242,6 +247,72 @@ func crossReference(root string, relPaths []string, entries map[string]*Entry) e
 		}
 	}
 	return nil
+}
+
+// isPathTokenByte reports whether b can continue a file-path token. A match
+// flanked by one of these is part of a longer name rather than a reference to
+// the candidate itself: "scripts/deploy.sh" found inside
+// "scripts/deploy.sh.bak" is the backup being named, not the script.
+//
+// "/" is deliberately excluded. Prose routinely names an inventoried file
+// through a relative prefix ("see ../../references/notes.csv"), and treating
+// the separator as a continuation byte would discard those real citations.
+// The cost is that a path mention which merely ends with an inventoried path
+// still matches; that is far rarer than the relative-prefix case, and such a
+// citation is reported as the weaker MatchBasename/MatchPath evidence it is.
+func isPathTokenByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	}
+	return b == '_' || b == '-'
+}
+
+// findPathToken returns the byte offset of the first occurrence of needle in
+// line that stands on its own path-token boundaries, or -1 if there is none.
+// It is the guard against citing a file that was never actually mentioned.
+func findPathToken(line, needle string) int {
+	if needle == "" {
+		return -1
+	}
+	for start := 0; start+len(needle) <= len(line); {
+		i := strings.Index(line[start:], needle)
+		if i < 0 {
+			return -1
+		}
+		i += start
+		if boundedLeft(line, i) && boundedRight(line, i+len(needle)) {
+			return i
+		}
+		start = i + 1
+	}
+	return -1
+}
+
+func boundedLeft(line string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	prev := line[i-1]
+	// A leading "." would make this the tail of a dotted name ("v2.deploy.sh").
+	return !isPathTokenByte(prev) && prev != '.'
+}
+
+func boundedRight(line string, end int) bool {
+	if end >= len(line) {
+		return true
+	}
+	next := line[end]
+	if isPathTokenByte(next) {
+		return false
+	}
+	if next != '.' {
+		return true
+	}
+	// A "." continues the token only when a name follows it: ".bak" in
+	// "deploy.sh.bak" disqualifies the match, but the sentence-ending period
+	// in "run deploy.sh." does not.
+	return end+1 >= len(line) || !isPathTokenByte(line[end+1])
 }
 
 type candidate struct {
