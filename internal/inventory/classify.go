@@ -238,13 +238,14 @@ func crossReference(root string, relPaths []string, entries map[string]*Entry) e
 		if err != nil {
 			return fmt.Errorf("read %s for citation scan: %w", rel, err)
 		}
+		depth := dirDepth(rel)
 
 		for lineNo, line := range lines {
 			for _, target := range candidates {
 				if target.path == rel {
 					continue // a file never cites itself
 				}
-				at, kind, matched := findReference(line, target)
+				at, kind, matched := findReference(line, target, depth)
 				if at < 0 {
 					continue
 				}
@@ -326,10 +327,23 @@ func pathTokenAround(line string, i, n int) (int, int) {
 // tree, so a shared basename demands an exact path. That is the bare-name
 // ambiguity guard, extended to partial paths: "y/report.json" must not fan out
 // across "x/y/report.json" and "z/y/report.json".
-func classifyReference(written string, target candidate) (MatchKind, bool) {
+//
+// citerDepth is how many directories deep the citing file sits, and bounds how
+// far ".." may climb. A reference that climbs past the workspace root names
+// something outside the tree, so it cannot be evidence about a file inside it:
+// "../../references/data.csv" is a real citation from skills/foo/SKILL.md and
+// nothing at all from a root-level CLAUDE.md.
+func classifyReference(written string, target candidate, citerDepth int) (MatchKind, bool) {
 	segs := strings.Split(written, "/")
+	ups := 0
 	for len(segs) > 1 && (segs[0] == "." || segs[0] == "..") {
+		if segs[0] == ".." {
+			ups++
+		}
 		segs = segs[1:]
+	}
+	if ups > citerDepth {
+		return "", false
 	}
 	want := strings.Split(target.path, "/")
 	if len(segs) > len(want) {
@@ -358,7 +372,7 @@ func classifyReference(written string, target candidate) (MatchKind, bool) {
 // A rejected occurrence does not end the scan, so a line carrying both
 // "archive/references/data.csv" and "references/data.csv" still cites the
 // second.
-func findReference(line string, target candidate) (int, MatchKind, string) {
+func findReference(line string, target candidate, citerDepth int) (int, MatchKind, string) {
 	for from := 0; ; {
 		i := strings.Index(line[from:], target.base)
 		if i < 0 {
@@ -369,10 +383,20 @@ func findReference(line string, target candidate) (int, MatchKind, string) {
 
 		start, end := pathTokenAround(line, i, len(target.base))
 		written := line[start:end]
-		if kind, ok := classifyReference(written, target); ok {
+		if kind, ok := classifyReference(written, target, citerDepth); ok {
 			return start, kind, written
 		}
 	}
+}
+
+// dirDepth reports how many directories deep rel sits, so ".." in a reference
+// written there can be bounded against the workspace root.
+func dirDepth(rel string) int {
+	dir := path.Dir(rel)
+	if dir == "." {
+		return 0
+	}
+	return strings.Count(dir, "/") + 1
 }
 
 type candidate struct {

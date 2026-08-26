@@ -549,6 +549,112 @@ func TestDiscoverHandlesNonASCIIPathSegments(t *testing.T) {
 	}
 }
 
+// TestDiscoverCitationPathShapes sweeps the path forms real prose actually
+// contains — absolute, relative, navigated, URL, Windows-separated, and paths
+// naming files that do not exist — and pins what each does.
+//
+// The safety-relevant rows are the navigated ones. Citations are pure string
+// matching over a read-only walk, so nothing here can reach outside the
+// workspace on disk; what it CAN do is manufacture evidence about a file
+// inside the tree from a reference that points outside it, which is what the
+// escape rows guard.
+func TestDiscoverCitationPathShapes(t *testing.T) {
+	cases := []struct {
+		name    string
+		citer   string // markdown file holding the mention
+		mention string // the reference exactly as written in prose
+		target  string // inventoried file we assert about
+		want    MatchKind
+		cited   bool
+	}{
+		// Forms that name the target and should cite.
+		{"exact path", "CLAUDE.md", "See references/data.csv here.", "references/data.csv", MatchPath, true},
+		{"explicit ./", "CLAUDE.md", "See ./references/data.csv here.", "references/data.csv", MatchPath, true},
+		{"navigation within depth", "skills/foo/SKILL.md", "See ../../references/data.csv here.", "references/data.csv", MatchPath, true},
+		{"bare unique basename", "CLAUDE.md", "See data.csv here.", "references/data.csv", MatchBasename, true},
+		{"partial path", "CLAUDE.md", "See foo/run.sh here.", "skills/foo/run.sh", MatchBasename, true},
+		{"hidden file", "CLAUDE.md", "Copy .env before running.", ".env", MatchPath, true},
+		// A query string is not part of the path token, so the path still reads.
+		{"trailing query string", "CLAUDE.md", "See references/data.csv?v=2 here.", "references/data.csv", MatchPath, true},
+		// Windows separator: the backslash ends the token, leaving a bare name,
+		// which is honestly reported as the weaker basename evidence.
+		{"windows separator", "CLAUDE.md", `See scripts\deploy.sh here.`, "scripts/deploy.sh", MatchBasename, true},
+
+		// Escapes: the reference climbs above the workspace root, so it names
+		// something outside the tree and is not evidence about anything in it.
+		{"navigation past root", "CLAUDE.md", "See ../../references/data.csv here.", "references/data.csv", "", false},
+		{"deep escape to system path", "CLAUDE.md", "Unlike ../../../../../../etc/data.csv, ours is local.", "etc/data.csv", "", false},
+		{"escape from shallow citer", "docs/guide.md", "See ../../references/data.csv here.", "references/data.csv", "", false},
+
+		// Forms that name a different file, or no file in this tree.
+		{"absolute path", "CLAUDE.md", "See /references/data.csv here.", "references/data.csv", "", false},
+		{"url", "CLAUDE.md", "See https://example.com/references/data.csv here.", "references/data.csv", "", false},
+		{"home-relative", "CLAUDE.md", "See ~/data.csv here.", "references/data.csv", "", false},
+		{"different directory", "CLAUDE.md", "See other/data.csv here.", "references/data.csv", "", false},
+		{"longer path ending in target", "CLAUDE.md", "See archive/references/data.csv here.", "references/data.csv", "", false},
+		{"path below target", "CLAUDE.md", "See references/data.csv/old here.", "references/data.csv", "", false},
+		{"case mismatch", "CLAUDE.md", "See References/Data.csv here.", "references/data.csv", "", false},
+		{"empty segment", "CLAUDE.md", "See references//data.csv here.", "references/data.csv", "", false},
+		{"unnormalized mid-path dot", "CLAUDE.md", "See references/./data.csv here.", "references/data.csv", "", false},
+		{"sibling that does not exist", "CLAUDE.md", "See references/missing.csv here.", "references/data.csv", "", false},
+		{"parent then back down", "CLAUDE.md", "See ../repo/references/data.csv here.", "references/data.csv", "", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			mustWrite(t, filepath.Join(root, filepath.FromSlash(c.target)), "content\n")
+			mustWrite(t, filepath.Join(root, filepath.FromSlash(c.citer)), "# Doc\n\n"+c.mention+"\n")
+
+			inv, err := Discover(root)
+			if err != nil {
+				t.Fatalf("Discover() error = %v", err)
+			}
+			got := entryMap(inv)[c.target].ReferencedBy
+
+			if !c.cited {
+				if len(got) != 0 {
+					t.Fatalf("%s ReferencedBy = %+v, want empty", c.target, got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("%s ReferencedBy = %+v, want exactly 1", c.target, got)
+			}
+			if got[0].MatchKind != c.want {
+				t.Errorf("MatchKind = %q, want %q (matched %q)", got[0].MatchKind, c.want, got[0].MatchedText)
+			}
+		})
+	}
+}
+
+// TestDiscoverRejectsUnusableRoot covers the remaining preconditions on the
+// discovery root beside the symlink case: a root that is missing, or is a
+// regular file, must fail loudly rather than walk nothing and report a
+// successful empty inventory.
+func TestDiscoverRejectsUnusableRoot(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		inv, err := Discover(filepath.Join(t.TempDir(), "no-such-workspace"))
+		if err == nil {
+			t.Fatalf("Discover() error = nil with %d entries, want an error", len(inv.Entries))
+		}
+	})
+
+	t.Run("regular file", func(t *testing.T) {
+		root := t.TempDir()
+		file := filepath.Join(root, "CLAUDE.md")
+		mustWrite(t, file, "# Not a workspace\n")
+
+		inv, err := Discover(file)
+		if err == nil {
+			t.Fatalf("Discover() error = nil with %d entries, want an error", len(inv.Entries))
+		}
+		if !strings.Contains(err.Error(), "directory") {
+			t.Errorf("Discover(file) error = %v, want it to say the root is not a directory", err)
+		}
+	})
+}
+
 // TestDiscoverRecognizesProviderPrefixedAgentFiles reproduces a real gap
 // found by running Discover against an actual public Claude Code project
 // (ChrisWiles/claude-code-showcase): .claude/agents/code-reviewer.md is
