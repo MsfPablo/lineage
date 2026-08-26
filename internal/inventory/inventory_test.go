@@ -406,6 +406,149 @@ func TestDiscoverCitationSurvivesAdjacentPunctuation(t *testing.T) {
 	}
 }
 
+// TestDiscoverRejectsLongerPathEndingInTarget is the reviewer-reported case:
+// a directory prefix means the prose named a *different* file that merely
+// shares a tail. Round 1 accepted any "/" before a match, which made this a
+// citation.
+func TestDiscoverRejectsLongerPathEndingInTarget(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "references", "data.csv"), "a,b\n")
+	mustWrite(t, filepath.Join(root, "archive", "references", "data.csv"), "old,data\n")
+	mustWrite(t, filepath.Join(root, "CLAUDE.md"),
+		"# Notes\n\nOnly archive/references/data.csv is stale.\n")
+
+	inv, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	byPath := entryMap(inv)
+
+	if got := byPath["references/data.csv"].ReferencedBy; len(got) != 0 {
+		t.Errorf("references/data.csv ReferencedBy = %+v, want empty (only the archive copy was named)", got)
+	}
+	got := byPath["archive/references/data.csv"].ReferencedBy
+	if len(got) != 1 {
+		t.Fatalf("archive/references/data.csv ReferencedBy = %+v, want exactly 1", got)
+	}
+	if got[0].MatchKind != MatchPath {
+		t.Errorf("MatchKind = %q, want %q", got[0].MatchKind, MatchPath)
+	}
+}
+
+// TestDiscoverRejectsSubpathOfTarget is the same defect at the other boundary,
+// found by inspecting for it rather than reported: an entry with no extension
+// is a prefix of a longer path, and round 1 accepted a "/" immediately after a
+// match just as it did before one.
+func TestDiscoverRejectsSubpathOfTarget(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "scripts", "build"), "#!/bin/sh\n")
+	mustWrite(t, filepath.Join(root, "CLAUDE.md"),
+		"# Notes\n\nArtifacts land in scripts/build/output.txt after a run.\n")
+
+	inv, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	byPath := entryMap(inv)
+
+	if got := byPath["scripts/build"].ReferencedBy; len(got) != 0 {
+		t.Errorf("scripts/build ReferencedBy = %+v, want empty (a path under it was named, not it)", got)
+	}
+}
+
+// TestDiscoverCitesPartialPath pins the behavior the reviewer's literal
+// suggestion (allow only "./" and "../") would have dropped: naming a file by
+// a partial path is a real reference, and messy workspaces write them.
+func TestDiscoverCitesPartialPath(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "skills", "foo", "run.sh"), "#!/bin/sh\n")
+	mustWrite(t, filepath.Join(root, "CLAUDE.md"), "# Notes\n\nInvoke foo/run.sh to start.\n")
+
+	inv, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	byPath := entryMap(inv)
+
+	got := byPath["skills/foo/run.sh"].ReferencedBy
+	if len(got) != 1 {
+		t.Fatalf("skills/foo/run.sh ReferencedBy = %+v, want exactly 1", got)
+	}
+	// A suffix of the path, so weaker than an exact mention but real.
+	if got[0].MatchKind != MatchBasename {
+		t.Errorf("MatchKind = %q, want %q", got[0].MatchKind, MatchBasename)
+	}
+	if want := "foo/run.sh"; got[0].MatchedText != want {
+		t.Errorf("MatchedText = %q, want %q", got[0].MatchedText, want)
+	}
+}
+
+// TestDiscoverSuppressesAmbiguousPartialPath extends the bare-name ambiguity
+// guard to partial paths: "y/report.json" identifies a file only if the
+// basename is unique, and here it is not.
+func TestDiscoverSuppressesAmbiguousPartialPath(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "x", "y", "report.json"), "{}\n")
+	mustWrite(t, filepath.Join(root, "z", "y", "report.json"), "{}\n")
+	mustWrite(t, filepath.Join(root, "CLAUDE.md"), "# Notes\n\nCheck y/report.json when debugging.\n")
+
+	inv, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	byPath := entryMap(inv)
+
+	for _, p := range []string{"x/y/report.json", "z/y/report.json"} {
+		e := byPath[p]
+		if len(e.ReferencedBy) != 0 {
+			t.Errorf("%s ReferencedBy = %+v, want empty (the partial path names both)", p, e.ReferencedBy)
+		}
+		if !e.AmbiguousBasename {
+			t.Errorf("%s AmbiguousBasename = false, want true", p)
+		}
+	}
+}
+
+// TestDiscoverHandlesNonASCIIPathSegments covers both directions of the
+// byte-class gap. The matcher works on bytes, and every byte of a multi-byte
+// UTF-8 sequence is >= 0x80: read as a separator, an accented letter both
+// invents citations and — once widening decides matches — truncates a real
+// path at its non-ASCII segment and loses one.
+func TestDiscoverHandlesNonASCIIPathSegments(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "docs", "café", "data.csv"), "a,b\n")
+	mustWrite(t, filepath.Join(root, "notas.md"), "# Notas\n\nUnrelated.\n")
+	// "añnotas.md" puts the ñ's trailing byte directly against the match, which
+	// is what it takes to reproduce the false positive — an ASCII letter in
+	// between (as in "añonotas.md") is already rejected as a token byte.
+	mustWrite(t, filepath.Join(root, "CLAUDE.md"),
+		"# Notes\n\nRead docs/café/data.csv first.\nSee añnotas.md for the rest.\n")
+
+	inv, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	byPath := entryMap(inv)
+
+	// Real citation must survive the accented directory segment.
+	got := byPath["docs/café/data.csv"].ReferencedBy
+	if len(got) != 1 {
+		t.Fatalf("docs/café/data.csv ReferencedBy = %+v, want exactly 1", got)
+	}
+	if want := "docs/café/data.csv"; got[0].MatchedText != want {
+		t.Errorf("MatchedText = %q, want %q (must not truncate at the non-ASCII segment)", got[0].MatchedText, want)
+	}
+	if got[0].MatchKind != MatchPath {
+		t.Errorf("MatchKind = %q, want %q", got[0].MatchKind, MatchPath)
+	}
+
+	// And an accent must not read as a word break: "añonotas.md" is not a
+	// mention of "notas.md".
+	if got := byPath["notas.md"].ReferencedBy; len(got) != 0 {
+		t.Errorf("notas.md ReferencedBy = %+v, want empty (a different filename was named)", got)
+	}
+}
+
 // TestDiscoverRecognizesProviderPrefixedAgentFiles reproduces a real gap
 // found by running Discover against an actual public Claude Code project
 // (ChrisWiles/claude-code-showcase): .claude/agents/code-reviewer.md is

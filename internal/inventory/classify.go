@@ -189,8 +189,9 @@ func languageFor(rel string) string {
 }
 
 // crossReference implements pass 2: every markdown file's content is
-// scanned line-by-line for literal occurrences of any other entry's
-// relative path or bare filename. Each (line, target) pair becomes one
+// scanned line-by-line for path references that name another entry — its full
+// relative path, or a suffix of it down to the bare filename (see
+// classifyReference). Each (line, target) pair becomes one
 // Citation — a directed FromPath -> ToPath edge — recorded on both the
 // citer's Mentions and the target's ReferencedBy, so the graph reads from
 // either end. A line naming the same target twice yields one citation,
@@ -243,7 +244,7 @@ func crossReference(root string, relPaths []string, entries map[string]*Entry) e
 				if target.path == rel {
 					continue // a file never cites itself
 				}
-				at, kind, matched := matchTarget(line, target)
+				at, kind, matched := findReference(line, target)
 				if at < 0 {
 					continue
 				}
@@ -266,103 +267,112 @@ func crossReference(root string, relPaths []string, entries map[string]*Entry) e
 	return nil
 }
 
-// isPathTokenByte reports whether b can continue a file-path token. A match
-// flanked by one of these is part of a longer name rather than a reference to
-// the candidate itself: "scripts/deploy.sh" found inside
-// "scripts/deploy.sh.bak" is the backup being named, not the script.
+// isPathTokenByte reports whether b can appear inside a single path segment.
 //
-// "/" is deliberately excluded. Prose routinely names an inventoried file
-// through a relative prefix ("see ../../references/notes.csv"), and treating
-// the separator as a continuation byte would discard those real citations.
-// The cost is that a path mention which merely ends with an inventoried path
-// still matches; that is far rarer than the relative-prefix case.
+// Every byte of a multi-byte UTF-8 sequence is >= 0x80, so those count too: an
+// accented letter is part of the name, and reading it as a separator breaks
+// both directions. It invents citations, where a name butting straight against
+// the match ("añnotas.md" naming "notas.md") looks like a clean word break;
+// and, now that widening decides matches, it loses real ones by truncating a
+// path at its non-ASCII segment, so "docs/café/data.csv" would widen to only
+// "/data.csv" and fail to match itself.
 func isPathTokenByte(b byte) bool {
-	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_' || b == '-'
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' ||
+		b == '_' || b == '-' || b >= 0x80
 }
 
-// findPathToken returns the byte offset of the first occurrence of needle in
-// line that stands on its own path-token boundaries, or -1 if there is none.
-// It is the guard against citing a file that was never actually mentioned.
-func findPathToken(line, needle string) int {
-	if needle == "" {
-		return -1
-	}
-	for start := 0; ; {
-		i := strings.Index(line[start:], needle)
-		if i < 0 {
-			return -1
-		}
-		i += start
-		if boundedLeft(line, i) && boundedRight(line, i+len(needle)) {
-			return i
-		}
-		start = i + 1
-	}
-}
-
-func boundedLeft(line string, i int) bool {
-	if i == 0 {
-		return true
-	}
-	prev := line[i-1]
-	// A leading "." would make this the tail of a dotted name ("v2.deploy.sh").
-	return !isPathTokenByte(prev) && prev != '.'
-}
-
-func boundedRight(line string, end int) bool {
-	if end >= len(line) {
-		return true
-	}
-	next := line[end]
-	if isPathTokenByte(next) {
-		return false
-	}
-	if next != '.' {
-		return true
-	}
-	// A "." continues the token only when a name follows it: ".bak" in
-	// "deploy.sh.bak" disqualifies the match, but the sentence-ending period
-	// in "run deploy.sh." does not.
-	return end+1 >= len(line) || !isPathTokenByte(line[end+1])
-}
-
-// matchTarget reports where and how line names target, along with the
-// reference exactly as the prose wrote it. A full-path mention is the stronger
-// claim, so it is tried first and wins when both forms match the same line.
-func matchTarget(line string, target candidate) (int, MatchKind, string) {
-	if at := findPathToken(line, target.path); at >= 0 {
-		start, text := writtenRef(line, at, len(target.path))
-		return start, MatchPath, text
-	}
-	if target.baseShared {
-		return -1, "", ""
-	}
-	if at := findPathToken(line, target.base); at >= 0 {
-		start, text := writtenRef(line, at, len(target.base))
-		return start, MatchBasename, text
-	}
-	return -1, "", ""
-}
-
-// writtenRef widens a match to the whole path reference around it, so a
-// citation can report what the prose actually said rather than the needle that
-// found it. A line naming "../../references/data.csv" cites
-// references/data.csv, but the relative prefix is part of the reference and a
-// consumer resolving it needs to see it. Returns the offset and text of the
-// widened span.
-//
-// boundedLeft already guarantees the byte before a match is neither a
-// path-token byte nor ".", so this only ever widens across a "/" separator
-// and whatever path bytes precede it.
-func writtenRef(line string, at, length int) (int, string) {
-	start := at
+// pathTokenAround widens [i, i+n) to the whole path token the prose wrote
+// around it, and is what turns a bare substring hit into a claim that can be
+// checked. A "." belongs to the token only when a name follows it, so ".bak"
+// in "deploy.sh.bak" is pulled in while the period ending "run deploy.sh." is
+// left out.
+func pathTokenAround(line string, i, n int) (int, int) {
+	start := i
 	for start > 0 {
 		if b := line[start-1]; !isPathTokenByte(b) && b != '/' && b != '.' {
 			break
 		}
 		start--
 	}
-	return start, line[start : at+length]
+	end := i + n
+	for end < len(line) {
+		b := line[end]
+		if isPathTokenByte(b) || b == '/' {
+			end++
+			continue
+		}
+		if b == '.' && end+1 < len(line) && (isPathTokenByte(line[end+1]) || line[end+1] == '/') {
+			end++
+			continue
+		}
+		break
+	}
+	return start, end
+}
+
+// classifyReference decides whether written — one path token lifted from the
+// prose — names target, and how strongly.
+//
+// Leading "." and ".." segments are navigation: they reach the same file from
+// a different vantage point, so they are stripped before comparing. What
+// remains must be a segment-aligned suffix of the target's path. Equality is
+// the strongest claim; a proper suffix ("foo/run.sh", or a bare "run.sh") is a
+// partial reference. Anything else names a *different* file that merely shares
+// a tail — "archive/references/data.csv" is not a mention of
+// "references/data.csv", and "scripts/build/output.txt" is not a mention of
+// "scripts/build".
+//
+// A proper suffix only identifies one file when the basename is unique in the
+// tree, so a shared basename demands an exact path. That is the bare-name
+// ambiguity guard, extended to partial paths: "y/report.json" must not fan out
+// across "x/y/report.json" and "z/y/report.json".
+func classifyReference(written string, target candidate) (MatchKind, bool) {
+	segs := strings.Split(written, "/")
+	for len(segs) > 1 && (segs[0] == "." || segs[0] == "..") {
+		segs = segs[1:]
+	}
+	want := strings.Split(target.path, "/")
+	if len(segs) > len(want) {
+		return "", false
+	}
+	for k := 1; k <= len(segs); k++ {
+		if segs[len(segs)-k] != want[len(want)-k] {
+			return "", false
+		}
+	}
+	if len(segs) == len(want) {
+		return MatchPath, true
+	}
+	if target.baseShared {
+		return "", false
+	}
+	return MatchBasename, true
+}
+
+// findReference scans line for a mention of target, returning the offset of the
+// reference as written, how strong the match is, and its text — or -1 when the
+// line does not name target.
+//
+// Every path ends in its own basename, so one scan for the basename finds every
+// occurrence worth considering; the widened token around each is what decides.
+// A rejected occurrence does not end the scan, so a line carrying both
+// "archive/references/data.csv" and "references/data.csv" still cites the
+// second.
+func findReference(line string, target candidate) (int, MatchKind, string) {
+	for from := 0; ; {
+		i := strings.Index(line[from:], target.base)
+		if i < 0 {
+			return -1, "", ""
+		}
+		i += from
+		from = i + 1
+
+		start, end := pathTokenAround(line, i, len(target.base))
+		written := line[start:end]
+		if kind, ok := classifyReference(written, target); ok {
+			return start, kind, written
+		}
+	}
 }
 
 type candidate struct {
@@ -376,13 +386,14 @@ type candidate struct {
 
 // buildCandidates returns one candidate per relative path, in the same
 // (sorted) order Discover already computed relPaths in; crossReference walks
-// them in that order, so a line's citations come out sorted by ToPath. Bare-filename matching is only offered
-// for basenames that are unique across the whole tree: on a real workspace,
-// generic names like "config.json" or dated output like
+// them in that order, so a line's citations come out sorted by ToPath.
+//
+// baseShared marks the basenames that are not unique across the tree. On a real
+// workspace, generic names like "config.json" or dated output like
 // "workspace/2024-01-01/report.json" can share a basename with dozens of
 // unrelated files, and matching all of them turns one real citation into a
-// flood of false ones. An ambiguous basename still matches via its full
-// relative path (unambiguous), just not by bare name.
+// flood of false ones. Such a file is still citable by its full relative path,
+// which is unambiguous — just not by any shorter reference.
 func buildCandidates(relPaths []string) []candidate {
 	baseCounts := make(map[string]int, len(relPaths))
 	for _, rel := range relPaths {

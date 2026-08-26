@@ -44,14 +44,18 @@ const (
 )
 
 // MatchKind records how a citation was found, which is a statement about how
-// strong the evidence is rather than how certain it is. A full relative path
-// is a far more specific claim than a bare filename that merely happens to be
-// unique in this tree, and a consumer weighing evidence should treat the two
-// differently.
+// strong the evidence is rather than how certain it is. A consumer weighing
+// evidence should treat the two differently.
 type MatchKind string
 
 const (
-	MatchPath     MatchKind = "path"
+	// MatchPath means the prose named the entry's full relative path (possibly
+	// reached through "./" or "../"). The most specific claim available.
+	MatchPath MatchKind = "path"
+	// MatchBasename means the prose named a proper suffix of the entry's path:
+	// a bare filename, or a partial path like "foo/run.sh" for
+	// "skills/foo/run.sh". Weaker, and only offered when the entry's basename
+	// is unique in the tree, since otherwise a suffix names several files.
 	MatchBasename MatchKind = "basename"
 )
 
@@ -101,9 +105,10 @@ type Entry struct {
 	Language string `json:"language,omitempty"` // by extension, best-effort
 
 	// AmbiguousBasename is true when this file's basename is shared with at
-	// least one other file in the tree, so bare-name citation matching was
-	// suppressed for it (see buildCandidates) and only a full-path mention
-	// could cite it.
+	// least one other file in the tree. A partial reference — a bare filename,
+	// or any suffix short of the full path — would name several files, so it is
+	// suppressed for this entry (see buildCandidates) and only an exact path
+	// mention can cite it.
 	//
 	// Without this flag an empty ReferencedBy is ambiguous: a consumer cannot
 	// tell a genuinely unreferenced file from one whose weak matches were
