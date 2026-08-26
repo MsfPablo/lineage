@@ -3,6 +3,7 @@ package materialize
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -115,6 +116,9 @@ func TestApplyStagesSkillsAndWritesContextFile(t *testing.T) {
 // replicated into the receiver's project, potentially leaving
 // world-writable files behind on a multi-user machine.
 func TestApplyCapsStagedFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows chmod does not expose POSIX group/other write bits, so the 0o755 cap has no equivalent FileMode assertion")
+	}
 	withUmask0(func() {
 		root := t.TempDir()
 		pkg := buildTestPackage(t, "loose-perms-pack", "loose")
