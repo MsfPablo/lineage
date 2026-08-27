@@ -160,7 +160,7 @@ Commands:
   validate <path>                 check schema, safety, and exports
   export <path> [-o file.tgz]     write a deterministic archive
   import <file.tgz> [--as name]   install an archive locally
-  publish <path>                  publish to the Lineage registry
+  publish <path> [--yes]          publish to the Lineage registry
   pull <ref> [--as name]          fetch a published package
 
 Run 'lineage package <command> --help' for details on one command.`
@@ -186,7 +186,7 @@ func runPackage(args []string, home string, stdin *bufio.Reader, stdout, stderr 
 		return nil
 	}
 	if len(args) < 2 {
-		err := fmt.Errorf("usage: lineage package init <name> | lineage package validate <path> | lineage package export <path> [-o file.tgz] | lineage package import <file.tgz> [--as name] | lineage package publish <path> | lineage package pull <package-ref> [--as name]")
+		err := fmt.Errorf("usage: lineage package init <name> | lineage package validate <path> | lineage package export <path> [-o file.tgz] | lineage package import <file.tgz> [--as name] | lineage package publish <path> [--yes] | lineage package pull <package-ref> [--as name]")
 		fmt.Fprintln(stderr, err)
 		return err
 	}
@@ -303,7 +303,6 @@ func runPackagePublish(args []string, home string, stdin *bufio.Reader, stdout, 
 	fmt.Fprintf(stdout, "published %s@%s (digest %s)\n", result.Name, result.Version, result.Digest)
 	return nil
 }
-
 
 func runPackagePull(args []string, home string, stdout, stderr io.Writer) error {
 	if hasHelpFlag(args) {
@@ -1451,7 +1450,7 @@ Registry:
   login                                   authorize with GitHub (device flow)
   logout                                  clear the stored credential
   whoami                                  show who publish/pull will act as
-  package publish <path>                  publish to the Lineage registry
+  package publish <path> [--yes]          publish to the Lineage registry
   package pull <ref> [--as name]          fetch a published package
 
 Using a package:
