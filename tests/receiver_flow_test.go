@@ -30,7 +30,7 @@ import (
 func TestReceiverFlow(t *testing.T) {
 	root := t.TempDir()
 
-	// --- Author side: build a small but genuine two-skill package with an
+	// --- Author side: build a small but genuine three-skill package with an
 	// ordered workflow, and validate it before it ever leaves this
 	// machine. ---
 	authorHome := filepath.Join(root, "author-home")
@@ -40,6 +40,7 @@ func TestReceiverFlow(t *testing.T) {
 
 	writeFile(t, filepath.Join(pkgDir, "skills", "collect", "SKILL.md"), "---\nname: collect\ndescription: Collect field notes from the receiver.\n---\n\nAsk the receiver for the essentials before doing anything else.\n")
 	writeFile(t, filepath.Join(pkgDir, "skills", "summarize", "SKILL.md"), "---\nname: summarize\ndescription: Summarize collected field notes.\n---\n\nTurn the collected notes into a short, honest summary.\n")
+	writeFile(t, filepath.Join(pkgDir, "skills", "archive", "SKILL.md"), "---\nname: archive\ndescription: Archive completed field reports.\n---\n\nStore the final report only after the active workflow is complete.\n")
 	writeFile(t, filepath.Join(pkgDir, "workflows", "field-report", "WORKFLOW.md"), "---\nsteps:\n  - collect\n  - summarize\n---\n\n# Field Report\n\n1. Collect notes.\n2. Summarize them.\n")
 
 	validateOut := run(t, authorHome, root, nil, "package", "validate", pkgDir)
@@ -77,8 +78,9 @@ func TestReceiverFlow(t *testing.T) {
 	}
 
 	// Confirm identity survived the trip intact before doing anything
-	// else: the receiver's copy must be byte-for-byte what the author
-	// exported, not just "close enough".
+	// else: the receiver's imported package must have the same
+	// content identity as the author's package, not just be "close
+	// enough".
 	authorPkg, err := packages.Discover(pkgDir)
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +110,7 @@ func TestReceiverFlow(t *testing.T) {
 	if _, err := os.Stat(launchMarker); err != nil {
 		t.Fatalf("expected the provider to have actually launched: %v", err)
 	}
-	for _, skill := range []string{"collect", "summarize"} {
+	for _, skill := range []string{"collect", "summarize", "archive"} {
 		p := filepath.Join(receiverProject, ".claude", "skills", "field-notes-"+skill, "SKILL.md")
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("expected %s materialized: %v", skill, err)
@@ -132,11 +134,14 @@ func TestReceiverFlow(t *testing.T) {
 		!strings.Contains(claudeMD, "2. summarize") {
 		t.Fatalf("CLAUDE.md = %q, want the ordered workflow sequence", claudeMD)
 	}
+	if _, err := os.Stat(filepath.Join(receiverProject, ".claude", "skills", "field-notes-archive")); !os.IsNotExist(err) {
+		t.Fatalf("expected archive absent from scoped workflow materialization, stat err = %v", err)
+	}
 
 	// A plain `lineage run` afterward must restore the full package -
 	// scoping to a workflow is reversible, not a one-way narrowing.
 	run(t, receiverHome, receiverProject, nil, "run", "claude", "--yes")
-	for _, skill := range []string{"collect", "summarize"} {
+	for _, skill := range []string{"collect", "summarize", "archive"} {
 		p := filepath.Join(receiverProject, ".claude", "skills", "field-notes-"+skill)
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("expected %s restored by the full run: %v", skill, err)
@@ -149,7 +154,7 @@ func TestReceiverFlow(t *testing.T) {
 	}
 
 	run(t, receiverHome, receiverProject, nil, "disable", "field-notes", "--yes")
-	for _, skill := range []string{"collect", "summarize"} {
+	for _, skill := range []string{"collect", "summarize", "archive"} {
 		p := filepath.Join(receiverProject, ".claude", "skills", "field-notes-"+skill)
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Fatalf("expected %s cleaned up after disable, stat err = %v", skill, err)
