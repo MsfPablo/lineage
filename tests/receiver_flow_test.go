@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -102,8 +103,7 @@ func TestReceiverFlow(t *testing.T) {
 	// provider needs that), not to cli.Execute's captured stdout buffer,
 	// so a marker file is the reliable way to confirm it actually ran.
 	launchMarker := filepath.Join(root, "claude-launched.marker")
-	fakeClaude := filepath.Join(receiverProject, "bin", "claude")
-	writeExecutable(t, fakeClaude, "#!/bin/sh\necho launched >> "+launchMarker+"\n")
+	fakeClaude := writeLaunchMarkerProvider(t, filepath.Join(receiverProject, "bin"), launchMarker)
 	setProviderBinary(t, receiverProject, "claude", fakeClaude)
 
 	run(t, receiverHome, receiverProject, nil, "run", "claude", "--yes")
@@ -228,14 +228,29 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func writeExecutable(t *testing.T, path, content string) {
+func writeLaunchMarkerProvider(t *testing.T, dir, markerPath string) string {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "claude.cmd")
+		content := "@echo off\r\n" +
+			">> \"" + markerPath + "\" echo launched\r\n"
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	path := filepath.Join(dir, "claude")
+	content := "#!/bin/sh\n" +
+		"echo launched >> \"" + markerPath + "\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	return path
 }
 
 func readFile(t *testing.T, path string) string {
