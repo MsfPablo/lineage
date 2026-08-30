@@ -3,6 +3,7 @@ package materialize
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -115,6 +116,9 @@ func TestApplyStagesSkillsAndWritesContextFile(t *testing.T) {
 // replicated into the receiver's project, potentially leaving
 // world-writable files behind on a multi-user machine.
 func TestApplyCapsStagedFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows chmod does not expose POSIX group/other write bits, so the 0o755 cap has no equivalent FileMode assertion")
+	}
 	withUmask0(func() {
 		root := t.TempDir()
 		pkg := buildTestPackage(t, "loose-perms-pack", "loose")
@@ -136,9 +140,7 @@ func TestApplyCapsStagedFilePermissions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected staged skill at %s: %v", staged, err)
 		}
-		if info.Mode().Perm()&0o022 != 0 {
-			t.Errorf("staged file mode = %v, want no group/other write bit (source was 0o777, umask forced to 0 so the OS can't mask this for us)", info.Mode().Perm())
-		}
+		assertNoLooseWriteBits(t, info.Mode())
 	})
 }
 
