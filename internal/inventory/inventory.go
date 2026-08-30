@@ -20,6 +20,26 @@
 // discovery root itself: an inventory reports on the tree literally named,
 // and quietly resolving elsewhere would make Inventory.Root a different path
 // from the one the caller asked about.
+//
+// Non-goals for a consumer of this evidence, worth stating up front rather
+// than discovering by producing wrong conclusions:
+//
+//   - ToPath is the only field on Citation that names a location. AsWritten
+//     is descriptive, not resolvable — for a MatchBasename edge it is a
+//     partial reference ("foo/run.sh" for skills/foo/run.sh) that cannot be
+//     turned into the real path by joining it against FromPath's directory.
+//     Re-deriving a location from AsWritten reproduces, at the consuming
+//     layer, exactly the navigation-resolution bugs this package's own
+//     matcher was hardened against; use ToPath.
+//   - Citation.Column is a byte offset, not a rune or character offset. A
+//     consumer that indexes by codepoint (as most languages other than Go
+//     do by default) will misalign on any line containing non-ASCII text.
+//   - Only markdown (.md) files are scanned for citations. A file whose only
+//     real reference is structural — e.g. named in a lineage.yaml manifest's
+//     entrypoints field, arguably stronger evidence than prose — produces no
+//     Citation at all today. An empty ReferencedBy on such a file is not
+//     evidence it is unused, the same caution AmbiguousBasename gives for a
+//     different reason; this package simply does not look there yet.
 package inventory
 
 import (
@@ -56,6 +76,13 @@ const (
 	// a bare filename, or a partial path like "foo/run.sh" for
 	// "skills/foo/run.sh". Weaker, and only offered when the entry's basename
 	// is unique in the tree, since otherwise a suffix names several files.
+	//
+	// A bare filename with no extension — "run", "build" — is never cited at
+	// all, by any match kind, unless named through a "/" or a "."/".." prefix:
+	// stripped of any path separator it is indistinguishable from an English
+	// word in ordinary prose. This applies even to such a file sitting at the
+	// workspace root, where a bare mention is technically also its whole
+	// path — root placement doesn't make the word any less ambiguous.
 	MatchBasename MatchKind = "basename"
 )
 
@@ -70,22 +97,28 @@ const (
 // what makes a single edge self-describing wherever it is read.
 type Citation struct {
 	FromPath  string    `json:"from_path"`  // the markdown file doing the citing
-	ToPath    string    `json:"to_path"`    // the inventoried artifact being named
+	ToPath    string    `json:"to_path"`    // the inventoried artifact being named — the only field naming a location
 	Line      int       `json:"line"`       // 1-indexed line number within FromPath
 	MatchKind MatchKind `json:"match_kind"` // how it matched, i.e. how strong the evidence is
 
-	// Column is a 1-indexed byte offset into the raw source line, where
-	// MatchedText begins. Note that Snippet is trimmed and truncated, so
-	// Column does not index into it.
+	// Column is a 1-indexed BYTE offset into the raw source line, where
+	// AsWritten begins — not a rune or character offset, so a consumer
+	// indexing by codepoint will misalign on a non-ASCII line. Note also
+	// that Snippet is trimmed and re-windowed, so Column does not index
+	// into it either.
 	Column int `json:"column"`
 
-	// MatchedText is the reference as the prose actually wrote it, which is
-	// not always ToPath: a line naming "../../references/data.csv" cites
-	// references/data.csv but wrote the relative prefix, and a consumer
-	// resolving the reference needs what was written.
-	MatchedText string `json:"matched_text"`
+	// AsWritten is the reference exactly as the prose wrote it, which is
+	// descriptive, not resolvable. It is not always ToPath: a line naming
+	// "../../references/data.csv" cites references/data.csv but wrote the
+	// relative prefix, and a line naming "foo/run.sh" (MatchBasename) wrote
+	// a partial reference to skills/foo/run.sh, not a location that can be
+	// joined against FromPath's directory to get there. Use ToPath for the
+	// location; use AsWritten only to show or reason about how the citing
+	// prose phrased the reference.
+	AsWritten string `json:"as_written"`
 
-	Snippet string `json:"snippet"` // the line's text, trimmed and truncated
+	Snippet string `json:"snippet"` // preview of the source line; always contains AsWritten
 }
 
 // maxSnippetLen bounds Citation.Snippet so a citation is always small and

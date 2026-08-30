@@ -280,8 +280,8 @@ func TestDiscoverCitationReportsMatchStrength(t *testing.T) {
 	if got[0].MatchKind != MatchBasename {
 		t.Errorf("MatchKind = %q, want %q (named as a bare filename, not a path)", got[0].MatchKind, MatchBasename)
 	}
-	if got[0].MatchedText != "run.sh" {
-		t.Errorf("MatchedText = %q, want %q", got[0].MatchedText, "run.sh")
+	if got[0].AsWritten != "run.sh" {
+		t.Errorf("AsWritten = %q, want %q", got[0].AsWritten, "run.sh")
 	}
 	if got[0].ToPath != "skills/foo/run.sh" {
 		t.Errorf("ToPath = %q, want %q", got[0].ToPath, "skills/foo/run.sh")
@@ -394,11 +394,11 @@ func TestDiscoverCitationSurvivesAdjacentPunctuation(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("references/data.csv ReferencedBy = %+v, want 1 (relative prefix + trailing period)", got)
 	}
-	// MatchedText reports the reference as the prose wrote it, relative prefix
+	// AsWritten reports the reference as the prose wrote it, relative prefix
 	// included — that prefix is what a consumer needs to resolve it, and it is
-	// the reason MatchedText is not simply ToPath.
-	if want := "../../references/data.csv"; got[0].MatchedText != want {
-		t.Errorf("MatchedText = %q, want %q", got[0].MatchedText, want)
+	// the reason AsWritten is not simply ToPath.
+	if want := "../../references/data.csv"; got[0].AsWritten != want {
+		t.Errorf("AsWritten = %q, want %q", got[0].AsWritten, want)
 	}
 	line := "Run `build.sh`, then read ../../references/data.csv."
 	if want := strings.Index(line, "../../") + 1; got[0].Column != want {
@@ -478,8 +478,8 @@ func TestDiscoverCitesPartialPath(t *testing.T) {
 	if got[0].MatchKind != MatchBasename {
 		t.Errorf("MatchKind = %q, want %q", got[0].MatchKind, MatchBasename)
 	}
-	if want := "foo/run.sh"; got[0].MatchedText != want {
-		t.Errorf("MatchedText = %q, want %q", got[0].MatchedText, want)
+	if want := "foo/run.sh"; got[0].AsWritten != want {
+		t.Errorf("AsWritten = %q, want %q", got[0].AsWritten, want)
 	}
 }
 
@@ -535,8 +535,8 @@ func TestDiscoverHandlesNonASCIIPathSegments(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("docs/café/data.csv ReferencedBy = %+v, want exactly 1", got)
 	}
-	if want := "docs/café/data.csv"; got[0].MatchedText != want {
-		t.Errorf("MatchedText = %q, want %q (must not truncate at the non-ASCII segment)", got[0].MatchedText, want)
+	if want := "docs/café/data.csv"; got[0].AsWritten != want {
+		t.Errorf("AsWritten = %q, want %q (must not truncate at the non-ASCII segment)", got[0].AsWritten, want)
 	}
 	if got[0].MatchKind != MatchPath {
 		t.Errorf("MatchKind = %q, want %q", got[0].MatchKind, MatchPath)
@@ -598,6 +598,25 @@ func TestDiscoverCitationPathShapes(t *testing.T) {
 		{"unnormalized mid-path dot", "CLAUDE.md", "See references/./data.csv here.", "references/data.csv", "", false},
 		{"sibling that does not exist", "CLAUDE.md", "See references/missing.csv here.", "references/data.csv", "", false},
 		{"parent then back down", "CLAUDE.md", "See ../repo/references/data.csv here.", "references/data.csv", "", false},
+
+		// Partial unwind: climbs some but not all the way to the root, so it
+		// resolves at an intermediate ancestor directory rather than either
+		// the true root or the citer's own directory. Round 3's ups-vs-depth
+		// bound alone accepted this (1 <= depth 2) without checking WHERE it
+		// actually lands, so "../scripts/deploy.sh" from skills/foo/SKILL.md
+		// cited a same-named root-level file instead of the real target,
+		// skills/scripts/deploy.sh — the wrong-directory case round 1's
+		// "within depth" row (which always lands exactly at the root) could
+		// never expose.
+		{"navigation lands in wrong ancestor", "skills/foo/SKILL.md", "See ../scripts/deploy.sh here.", "scripts/deploy.sh", "", false},
+		{"navigation lands in correct ancestor", "skills/foo/SKILL.md", "See ../scripts/deploy.sh here.", "skills/scripts/deploy.sh", MatchPath, true},
+
+		// "./" from a nested citer resolves relative to that citer's own
+		// directory, not fuzzy-matched against the whole tree: it must find
+		// the file actually beside the citer, and nowhere else with the same
+		// bare name.
+		{"same-directory dot resolves against nested citer", "skills/foo/SKILL.md", "See ./run.sh here.", "skills/foo/run.sh", MatchPath, true},
+		{"same-directory dot does not reach root", "skills/foo/SKILL.md", "See ./run.sh here.", "run.sh", "", false},
 	}
 
 	for _, c := range cases {
@@ -622,7 +641,7 @@ func TestDiscoverCitationPathShapes(t *testing.T) {
 				t.Fatalf("%s ReferencedBy = %+v, want exactly 1", c.target, got)
 			}
 			if got[0].MatchKind != c.want {
-				t.Errorf("MatchKind = %q, want %q (matched %q)", got[0].MatchKind, c.want, got[0].MatchedText)
+				t.Errorf("MatchKind = %q, want %q (matched %q)", got[0].MatchKind, c.want, got[0].AsWritten)
 			}
 		})
 	}
@@ -653,6 +672,113 @@ func TestDiscoverRejectsUnusableRoot(t *testing.T) {
 			t.Errorf("Discover(file) error = %v, want it to say the root is not a directory", err)
 		}
 	})
+}
+
+// TestDiscoverIgnoresBareExtensionlessWordsInProse pins the fix for a common
+// false positive round 3's rewrite left standing: a workspace file whose name
+// has no extension — "run", "build", "test", "main" are all realistic
+// contents of a bin/ or Makefile-target directory — is indistinguishable from
+// the same word appearing in ordinary sentences once path separators are
+// stripped. "Please run the tests" must not cite a file literally named
+// "run", whether that file sits at the workspace root (an exact-path match by
+// construction) or nested (a basename match) — extension is what makes a
+// bare mention safe to trust, not location.
+func TestDiscoverIgnoresBareExtensionlessWordsInProse(t *testing.T) {
+	t.Run("extensionless root file not cited by prose", func(t *testing.T) {
+		root := t.TempDir()
+		mustWrite(t, filepath.Join(root, "run"), "#!/bin/sh\n")
+		mustWrite(t, filepath.Join(root, "CLAUDE.md"), "# Notes\n\nPlease run the tests before committing.\n")
+
+		inv, err := Discover(root)
+		if err != nil {
+			t.Fatalf("Discover() error = %v", err)
+		}
+		if got := entryMap(inv)["run"].ReferencedBy; len(got) != 0 {
+			t.Errorf("run ReferencedBy = %+v, want empty (the word \"run\" in prose is not a citation)", got)
+		}
+	})
+
+	t.Run("extensionless nested file not cited by prose", func(t *testing.T) {
+		root := t.TempDir()
+		mustWrite(t, filepath.Join(root, "bin", "run"), "#!/bin/sh\n")
+		mustWrite(t, filepath.Join(root, "CLAUDE.md"), "# Notes\n\nPlease run the tests before committing.\n")
+
+		inv, err := Discover(root)
+		if err != nil {
+			t.Fatalf("Discover() error = %v", err)
+		}
+		if got := entryMap(inv)["bin/run"].ReferencedBy; len(got) != 0 {
+			t.Errorf("bin/run ReferencedBy = %+v, want empty", got)
+		}
+	})
+
+	t.Run("extensioned root file still cited by prose", func(t *testing.T) {
+		root := t.TempDir()
+		mustWrite(t, filepath.Join(root, "run.sh"), "#!/bin/sh\n")
+		mustWrite(t, filepath.Join(root, "CLAUDE.md"), "# Notes\n\nPlease run.sh before committing.\n")
+
+		inv, err := Discover(root)
+		if err != nil {
+			t.Fatalf("Discover() error = %v", err)
+		}
+		got := entryMap(inv)["run.sh"].ReferencedBy
+		if len(got) != 1 {
+			t.Fatalf("run.sh ReferencedBy = %+v, want exactly 1", got)
+		}
+		if got[0].MatchKind != MatchPath {
+			t.Errorf("MatchKind = %q, want %q", got[0].MatchKind, MatchPath)
+		}
+	})
+
+	t.Run("multi-segment path to extensionless file still cites", func(t *testing.T) {
+		root := t.TempDir()
+		mustWrite(t, filepath.Join(root, "bin", "run"), "#!/bin/sh\n")
+		mustWrite(t, filepath.Join(root, "CLAUDE.md"), "# Notes\n\nInvoke bin/run before committing.\n")
+
+		inv, err := Discover(root)
+		if err != nil {
+			t.Fatalf("Discover() error = %v", err)
+		}
+		got := entryMap(inv)["bin/run"].ReferencedBy
+		if len(got) != 1 {
+			t.Fatalf("bin/run ReferencedBy = %+v, want exactly 1 (a slash is never ambiguous with prose)", got)
+		}
+		if got[0].MatchKind != MatchPath {
+			t.Errorf("MatchKind = %q, want %q", got[0].MatchKind, MatchPath)
+		}
+	})
+}
+
+// TestDiscoverSnippetAlwaysContainsMatch pins the fix for Snippet silently
+// failing its one job on a long line: it used to always take a line's first
+// maxSnippetLen bytes, so a match past that offset produced a Snippet showing
+// unrelated earlier text while Column/AsWritten correctly pointed elsewhere —
+// a citation that looks justified but isn't, to any consumer (especially an
+// LLM) reading Snippet as the evidence for why the edge exists.
+func TestDiscoverSnippetAlwaysContainsMatch(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "scripts", "deploy.sh"), "#!/bin/sh\n")
+
+	filler := strings.Repeat("x", 250)
+	line := "# " + filler + " then run scripts/deploy.sh to ship."
+	mustWrite(t, filepath.Join(root, "CLAUDE.md"), line+"\n")
+
+	inv, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	got := entryMap(inv)["scripts/deploy.sh"].ReferencedBy
+	if len(got) != 1 {
+		t.Fatalf("scripts/deploy.sh ReferencedBy = %+v, want exactly 1", got)
+	}
+	c := got[0]
+	if len(line) <= maxSnippetLen {
+		t.Fatalf("test fixture line is %d bytes, want > %d to exercise truncation", len(line), maxSnippetLen)
+	}
+	if !strings.Contains(c.Snippet, c.AsWritten) {
+		t.Errorf("Snippet = %q does not contain AsWritten = %q (match offset %d, line length %d)",
+			c.Snippet, c.AsWritten, c.Column, len(line))
+	}
 }
 
 // TestDiscoverRecognizesProviderPrefixedAgentFiles reproduces a real gap
@@ -787,13 +913,13 @@ func pathCite(t *testing.T, from, to string, line int, text string) Citation {
 		t.Fatalf("pathCite: %q does not appear in %q", to, text)
 	}
 	return Citation{
-		FromPath:    from,
-		ToPath:      to,
-		Line:        line,
-		Column:      col + 1,
-		MatchKind:   MatchPath,
-		MatchedText: to,
-		Snippet:     strings.TrimSpace(text),
+		FromPath:  from,
+		ToPath:    to,
+		Line:      line,
+		Column:    col + 1,
+		MatchKind: MatchPath,
+		AsWritten: to,
+		Snippet:   strings.TrimSpace(text),
 	}
 }
 
