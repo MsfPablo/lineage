@@ -112,3 +112,65 @@ func TestValidateDependenciesUniqueProvidersAndResolvedRequirementsPass(t *testi
 		t.Fatalf("ValidateDependencies() error = %v, want nil", err)
 	}
 }
+
+// Two enabled packages that share a manifest name but differ in version must
+// be distinguished by name@version in the conflict error, never collapsed to
+// the ambiguous `both "foo" and "foo"`.
+func TestValidateDependenciesSameNameDifferentVersionDistinguishedByVersion(t *testing.T) {
+	fooV1 := Package{Manifest: Manifest{Name: "foo", Version: "1.0.0"}, Skills: []string{"research"}}
+	fooV2 := Package{Manifest: Manifest{Name: "foo", Version: "2.0.0"}, Skills: []string{"research"}}
+
+	err := ValidateDependencies([]Package{fooV1, fooV2})
+	if err == nil {
+		t.Fatal("ValidateDependencies() error = nil, want error for same-name different-version providers")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `"foo@1.0.0"`) {
+		t.Errorf("error %q does not identify provider foo@1.0.0", msg)
+	}
+	if !strings.Contains(msg, `"foo@2.0.0"`) {
+		t.Errorf("error %q does not identify provider foo@2.0.0", msg)
+	}
+	// The bare, ambiguous form must not appear for either provider.
+	if strings.Contains(msg, `both "foo" and "foo"`) {
+		t.Errorf("error %q uses the ambiguous bare-name form", msg)
+	}
+}
+
+// When two packages share both name and version, the resolved path must be
+// appended so the operator can tell the two copies apart.
+func TestValidateDependenciesSameNameAndVersionDistinguishedByPath(t *testing.T) {
+	pkgA := Package{Manifest: Manifest{Name: "foo", Version: "1.0.0"}, Path: "/srv/foo-a", Skills: []string{"research"}}
+	pkgB := Package{Manifest: Manifest{Name: "foo", Version: "1.0.0"}, Path: "/srv/foo-b", Skills: []string{"research"}}
+
+	err := ValidateDependencies([]Package{pkgA, pkgB})
+	if err == nil {
+		t.Fatal("ValidateDependencies() error = nil, want error for same-name same-version different-path providers")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "/srv/foo-a") || !strings.Contains(msg, "/srv/foo-b") {
+		t.Errorf("error %q does not distinguish the two copies by path", msg)
+	}
+}
+
+// The same package supplied twice (matching content digest) is one provider,
+// not a self-conflict: two enabled refs resolving to one package is the
+// intended duplicate-resolution case the reviewer asked us not to flag.
+func TestValidateDependenciesSameDigestDedupedIsNotAConflict(t *testing.T) {
+	once := Package{Manifest: Manifest{Name: "foo", Version: "1.0.0"}, Path: "/srv/foo", Digest: "abc123", Skills: []string{"research"}}
+	twice := Package{Manifest: Manifest{Name: "foo", Version: "1.0.0"}, Path: "/srv/foo", Digest: "abc123", Skills: []string{"research"}}
+
+	if err := ValidateDependencies([]Package{once, twice}); err != nil {
+		t.Fatalf("ValidateDependencies() error = %v, want nil (same-digest package is one provider)", err)
+	}
+}
+
+// When digests are not computed, the on-disk path still deduplicates the same
+// package, so a repeated entry does not register as a conflict.
+func TestValidateDependenciesSamePathDedupedIsNotAConflict(t *testing.T) {
+	pkg := Package{Manifest: Manifest{Name: "foo", Version: "1.0.0"}, Path: "/srv/foo", Skills: []string{"research"}}
+
+	if err := ValidateDependencies([]Package{pkg, pkg}); err != nil {
+		t.Fatalf("ValidateDependencies() error = %v, want nil (same-path package is one provider)", err)
+	}
+}
