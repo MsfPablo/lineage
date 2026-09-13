@@ -64,6 +64,7 @@ Preview provider materialization before anything is written:
 ```bash
 lineage run claude --dry-run
 lineage run codex --dry-run
+lineage run auggie --dry-run
 lineage workflow run resume-review claude --dry-run
 ```
 
@@ -77,8 +78,12 @@ materialization writes provider files.
 Declared capabilities are visible metadata, not a sandbox. They help receivers
 understand what a package says it needs before enabling it.
 
+See [docs/safety.md](../safety.md) for the full model, including secret-scanning
+limits and what's not implemented yet.
+
 Related docs:
 
+- [Safety model](../safety.md)
 - [Architecture](../architecture.md)
 - [Bootstrap prompt](../bootstrap-prompt.md)
 - [Distribution contract](../decisions/0012-v1-distribution-contract-and-receiver-activation.md)

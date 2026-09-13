@@ -3,6 +3,7 @@ package provider
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -26,21 +27,74 @@ func TestIsShimPath(t *testing.T) {
 	}
 }
 
-func TestResolveWithConfiguredBinary(t *testing.T) {
-	project := config.ProjectConfig{
-		Providers: map[string]config.Provider{
-			"codex": {Binary: "/bin/echo"},
-		},
+func TestResolveWithConfiguredBinaryForEveryLaunchableProvider(t *testing.T) {
+	for _, adapter := range Known() {
+		if adapter.MaterializeOnly {
+			continue
+		}
+
+		t.Run(adapter.Name, func(t *testing.T) {
+			binary := filepath.Join(t.TempDir(), adapter.Name)
+			project := config.ProjectConfig{
+				Providers: map[string]config.Provider{
+					adapter.Name: {
+						Binary: binary,
+						Args:   []string{"configured-arg"},
+					},
+				},
+			}
+
+			plan, err := Resolve(
+				adapter.Name, t.TempDir(), project, []string{"launch-arg"},
+			)
+
+			if err != nil {
+				t.Fatalf("Resolve() error = %v", err)
+			}
+
+			if plan.Name != adapter.Name {
+				t.Errorf("Name = %q, want %q", plan.Name, adapter.Name)
+			}
+
+			if plan.Binary != binary {
+				t.Errorf("Binary = %q, want %q", plan.Binary, binary)
+			}
+
+			wantArgs := []string{"configured-arg", "launch-arg"}
+			if !reflect.DeepEqual(plan.Args, wantArgs) {
+				t.Errorf("Args = %#v, want %#v", plan.Args, wantArgs)
+			}
+
+			if !containsString(plan.Env, "LINEAGE_PROVIDER="+adapter.Name) {
+				t.Errorf("Env does not contain LINEAGE_PROVIDER=%s", adapter.Name)
+			}
+
+			if !containsString(plan.Env, "LINEAGE_ACTIVE=1") {
+				t.Error("Env does not contain LINEAGE_ACTIVE=1")
+			}
+		})
 	}
-	plan, err := Resolve("codex", t.TempDir(), project, []string{"hello"})
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+
+	return false
+}
+
+func TestResolveMaterializeOnlyProviderDoesNotResolveBinary(t *testing.T) {
+	plan, err := Resolve("windsurf", t.TempDir(), config.ProjectConfig{
+		Providers: map[string]config.Provider{"windsurf": {Binary: "/path/that/must-not-be-resolved"}},
+	}, []string{"--project"})
 	if err != nil {
-		t.Fatalf("Resolve() error = %v", err)
+		t.Fatalf("Resolve(windsurf) error = %v", err)
 	}
-	if plan.Binary != "/bin/echo" {
-		t.Fatalf("Binary = %q", plan.Binary)
-	}
-	if len(plan.Args) != 1 || plan.Args[0] != "hello" {
-		t.Fatalf("Args = %#v", plan.Args)
+	if !plan.MaterializeOnly || plan.Binary != "" || len(plan.Args) != 1 || plan.Args[0] != "--project" {
+		t.Fatalf("Resolve(windsurf) = %#v, want materialization-only plan without binary", plan)
 	}
 }
 
@@ -53,18 +107,19 @@ func TestCandidateBinariesFindsMultipleAndSkipsShim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	writeExecutable(t, filepath.Join(dirA, "claude"))
-	writeExecutable(t, filepath.Join(dirB, "claude"))
+	claudeA := writeExecutable(t, filepath.Join(dirA, "claude"))
+	claudeB := writeExecutable(t, filepath.Join(dirB, "claude"))
 	writeExecutable(t, filepath.Join(shimDir, "claude"))
 
+	t.Setenv("PATHEXT", ".EXE;.CMD")
 	t.Setenv("PATH", strings.Join([]string{dirA, shimDir, dirB}, string(os.PathListSeparator)))
 
 	candidates := CandidateBinaries("claude", home)
 	if len(candidates) != 2 {
 		t.Fatalf("CandidateBinaries() = %#v, want 2 real candidates (shim excluded)", candidates)
 	}
-	if candidates[0] != filepath.Join(dirA, "claude") || candidates[1] != filepath.Join(dirB, "claude") {
-		t.Fatalf("CandidateBinaries() = %#v, want PATH order [%s, %s]", candidates, dirA, dirB)
+	if candidates[0] != claudeA || candidates[1] != claudeB {
+		t.Fatalf("CandidateBinaries() = %#v, want PATH order [%s, %s]", candidates, claudeA, claudeB)
 	}
 }
 
@@ -81,16 +136,17 @@ func TestCandidateBinariesSkipsShimContentOutsideShimsDir(t *testing.T) {
 	realDir := t.TempDir()
 	strayDir := t.TempDir() // NOT config.ShimsDir(home) - simulates a shim installed under a different LINEAGE_HOME, or copied elsewhere
 
-	writeExecutable(t, filepath.Join(realDir, "claude"))
-	strayShim := filepath.Join(strayDir, "claude")
+	realClaude := writeExecutable(t, filepath.Join(realDir, "claude"))
+	strayShim := filepath.Join(strayDir, "claude") + executableSuffix()
 	if err := os.WriteFile(strayShim, []byte("#!/bin/sh\nexec \"/some/other/lineage\" run claude \"$@\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
+	t.Setenv("PATHEXT", ".EXE;.CMD")
 	t.Setenv("PATH", strings.Join([]string{strayDir, realDir}, string(os.PathListSeparator)))
 
 	candidates := CandidateBinaries("claude", home)
-	if len(candidates) != 1 || candidates[0] != filepath.Join(realDir, "claude") {
+	if len(candidates) != 1 || candidates[0] != realClaude {
 		t.Fatalf("CandidateBinaries() = %#v, want only the real binary in %s (the shim-content stray copy in %s excluded)", candidates, realDir, strayDir)
 	}
 }
@@ -105,11 +161,27 @@ func TestCandidateBinariesEmptyWhenNoneFound(t *testing.T) {
 	}
 }
 
-func writeExecutable(t *testing.T, path string) {
+// writeExecutable creates a fake executable at base plus whatever suffix
+// the current OS needs for candidateBinariesFor to recognize it as a
+// candidate (see executableSuffix), and returns the path actually written.
+func writeExecutable(t *testing.T, base string) string {
 	t.Helper()
+	path := base + executableSuffix()
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	return path
+}
+
+// executableSuffix returns the filename suffix a bare command name needs
+// to be discovered by CandidateBinaries on the current OS: none on POSIX,
+// where the executable bit gates it instead, and ".EXE" on Windows, matching
+// the PATHEXT value set by the high-level CandidateBinaries tests above.
+func executableSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".EXE"
+	}
+	return ""
 }
 
 func TestCandidateExtensionsPOSIXIsExactName(t *testing.T) {
